@@ -1,0 +1,9 @@
+# /etc/systemd/network/80-can0.network — barramento da Xsens MTi-630 (Rover V3).
+# O bitrate tem de ser o mesmo do sensor (MT Manager) e o do hardware.json ("imu.bitrate").
+# Na Orin NX o controlador CAN é o mttcan: o instalar.sh carrega o módulo no boot.
+[Match]
+Name=can0
+
+[CAN]
+BitRate=500000
+RestartSec=100ms

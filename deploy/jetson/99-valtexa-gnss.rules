@@ -1,0 +1,4 @@
+# /etc/udev/rules.d/99-valtexa-gnss.rules — nome fixo para o u-blox ZED-F9P (USB CDC-ACM).
+# /dev/ttyACM0 muda de número quando outro dispositivo USB aparece primeiro; o
+# hardware.json usa /dev/valtexa-gnss. 1546 é o fabricante u-blox no USB.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", SYMLINK+="valtexa-gnss", GROUP="dialout", MODE="0660"

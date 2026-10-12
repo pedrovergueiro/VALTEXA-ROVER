@@ -1,0 +1,3 @@
+# Scripts e arquivos de instalação vão para Linux (Jetson): sempre LF, mesmo vindos do Windows.
+*.sh text eol=lf
+deploy/** text eol=lf

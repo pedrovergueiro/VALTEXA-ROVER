@@ -1,0 +1,60 @@
+# VALTEXA ROVER RUNTIME — unidade systemd do computador embarcado (F19).
+#
+# Instalação (resumo; ver docs/ROVER_RUNTIME.md, seção "Implantar"):
+#   useradd --system --home /var/lib/valtexa-rover valtexa
+#   python3 -m venv /opt/valtexa/venv && /opt/valtexa/venv/bin/pip install .   (3.10+)
+#   (Rover V3 / Jetson: use deploy/jetson/instalar.sh, que faz tudo isto)
+#   install -m 0644 deploy/valtexa-rover.service /etc/systemd/system/
+#   install -d -o valtexa -m 0750 /var/lib/valtexa-rover /etc/valtexa
+#   cp deploy/rover.json.exemplo /etc/valtexa/rover.json   # e ajustar
+#   (provisionar: gera /var/lib/valtexa-rover/identity.json, 0600)
+#   systemctl enable --now valtexa-rover
+#
+# O lançador (valtexa_rover.launcher) roda ANTES do Runtime, da instalação de base: conta
+# os boots das versões em teste instaladas por OTA e volta à anterior se a nova não
+# confirmar. Instale o pacote sem -e (o PYTHONPATH do slot precisa vencer o site-packages).
+#
+# Nenhum segredo neste arquivo: a chave privada do robô está em identity.json (0600),
+# gerada no próprio robô; a URL da plataforma vem de /etc/valtexa/rover.env.
+
+[Unit]
+Description=VALTEXA ROVER RUNTIME (Edge AI, missão, sincronização, OTA)
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=valtexa
+Group=valtexa
+EnvironmentFile=/etc/valtexa/rover.env
+# VALTEXA_URL=https://api.valtexa.com.br   (em /etc/valtexa/rover.env)
+# VALTEXA_HAL=adapters_do_robo:hardware    (módulo do integrador que monta a HAL real)
+ExecStart=/opt/valtexa/venv/bin/python -m valtexa_rover.launcher \
+    --dados /var/lib/valtexa-rover -- \
+    /opt/valtexa/venv/bin/python -m valtexa_rover.cli servico \
+    --dados /var/lib/valtexa-rover \
+    --identidade /var/lib/valtexa-rover/identity.json \
+    --config /etc/valtexa/rover.json \
+    --hal ${VALTEXA_HAL} --url ${VALTEXA_URL}
+Restart=always
+RestartSec=5
+# SIGTERM: o laço fecha a transação do quadro em curso e sai.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Menor privilégio (seção 36). Escrita só nos dados e na configuração (o OTA de
+# configuração troca /etc/valtexa/rover.json de forma atômica, com backup).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/valtexa-rover /etc/valtexa
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Câmeras, GPS e acelerador ficam em /dev: libere só os grupos do hardware definido
+# (ex.: SupplementaryGroups=video dialout).
+
+[Install]
+WantedBy=multi-user.target

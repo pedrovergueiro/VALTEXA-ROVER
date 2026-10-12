@@ -1,0 +1,70 @@
+{
+  "classificacao": {
+    "low_confidence_below": 0.6,
+    "anomaly_below": 0.3
+  },
+  "retencao": {
+    "rules": {
+      "NORMAL": {
+        "tier": "REDUZIDA",
+        "retention_days": 7,
+        "priority": 5,
+        "max_side": 320,
+        "jpeg_quality": 60,
+        "preserve_sequence": false
+      },
+      "POSSIVEL_PRAGA": {
+        "tier": "ORIGINAL",
+        "retention_days": 90,
+        "priority": 2,
+        "max_side": 0,
+        "jpeg_quality": 70,
+        "preserve_sequence": true
+      },
+      "POSSIVEL_DOENCA": {
+        "tier": "ORIGINAL",
+        "retention_days": 90,
+        "priority": 2,
+        "max_side": 0,
+        "jpeg_quality": 70,
+        "preserve_sequence": true
+      },
+      "ANOMALIA": {
+        "tier": "ORIGINAL",
+        "retention_days": 90,
+        "priority": 3,
+        "max_side": 0,
+        "jpeg_quality": 70,
+        "preserve_sequence": true
+      },
+      "BAIXA_CONFIANCA": {
+        "tier": "ORIGINAL",
+        "retention_days": 30,
+        "priority": 3,
+        "max_side": 0,
+        "jpeg_quality": 70,
+        "preserve_sequence": false
+      }
+    },
+    "normal_sample_every": 0
+  },
+  "buffer": {
+    "pre_frames": 3,
+    "post_frames": 3,
+    "max_duration_s": 10.0,
+    "max_side": 1024,
+    "jpeg_quality": 85,
+    "priority": 3
+  },
+  "sync": {
+    "chunk_size": 262144,
+    "batch_size": 200,
+    "backoff_base_s": 1.0,
+    "backoff_max_s": 60.0,
+    "max_attempts": 0
+  },
+  "saude": {
+    "min_free_bytes": 2147483648,
+    "max_temperature_c": 70.0
+  }
+}

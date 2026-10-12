@@ -1,0 +1,60 @@
+[project]
+name = "valtexa-rover"
+version = "0.1.0"
+description = "VALTEXA ROVER RUNTIME: Edge AI, HAL, missão offline-first, retenção e sincronização"
+requires-python = ">=3.10"
+# Só o que o computador embarcado precisa. O ONNX Runtime roda a IA; Pillow e
+# NumPy fazem o pré-processamento (o mesmo do treino, copiado do ia/); a
+# cryptography assina as requisições (Ed25519 — a stdlib não tem). Rede é urllib
+# e o banco local é sqlite3, ambos da stdlib.
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "onnxruntime>=1.17",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+# onnx só para os testes: eles geram um modelo minúsculo na hora (não há pesos
+# reais neste repositório).
+dev = ["pytest>=8.0", "ruff>=0.6", "onnx>=1.15"]
+# Rover V3 (valtexa_rover.hal.rover_v3): OAK-D (depthai 2.x), GNSS pela serial, IMU pelo CAN,
+# OpenCV para remapear a correção da lente (hal/lente.py; sem ele, a mesma conta em NumPy).
+# Na Jetson, o ONNX Runtime com CUDA/TensorRT vem do índice da NVIDIA (ver deploy/jetson/).
+rover-v3 = ["depthai>=2.24,<3", "pyserial>=3.5", "python-can>=4.3",
+            "opencv-python-headless>=4.8"]
+
+[project.scripts]
+valtexa-rover = "valtexa_rover.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["valtexa_rover*"]
+
+[tool.setuptools.package-data]
+# O modelo de demonstração do simulador (282 bytes, NÃO agronômico).
+"valtexa_rover.sim" = ["*.onnx", "*.json"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# Cópia byte a byte do ia/ (ver valtexa_rover/edge_ai/vendor/__init__.py): o
+# estilo é o de lá, e editar para agradar o lint quebraria a conferência.
+extend-exclude = ["valtexa_rover/edge_ai/vendor/preprocess.py",
+                  "valtexa_rover/edge_ai/vendor/onnx_runtime.py",
+                  "valtexa_rover/edge_ai/vendor/rover_geometry.py",
+                  "valtexa_rover/edge_ai/vendor/heads.py"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning"]

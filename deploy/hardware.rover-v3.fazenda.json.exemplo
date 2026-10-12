@@ -1,0 +1,34 @@
+{
+  "versao": "Rover V3 rev E",
+  "cameras": [
+    {"id": "esq-450",  "ip": "192.168.10.11", "altura_mm": 450,  "lado": "left", "fps": 5},
+    {"id": "esq-1000", "ip": "192.168.10.12", "altura_mm": 1000, "lado": "left", "fps": 5},
+    {"id": "esq-1540", "ip": "192.168.10.13", "altura_mm": 1540, "lado": "left", "fps": 5},
+    {"id": "dir-450",  "ip": "192.168.10.21", "altura_mm": 450,  "lado": "right", "fps": 5},
+    {"id": "dir-1000", "ip": "192.168.10.22", "altura_mm": 1000, "lado": "right", "fps": 5},
+    {"id": "dir-1540", "ip": "192.168.10.23", "altura_mm": 1540, "lado": "right", "fps": 5}
+  ],
+  "gnss": {"porta": "/dev/valtexa-gnss", "baud": 115200},
+  "imu": {
+    "canal": "can0",
+    "bitrate": 500000,
+    "ids": {"euler_id": 34, "euler_escala_graus": 0.0078125, "acc_id": 52, "acc_escala_ms2": 0.00390625}
+  },
+  "navegacao": {"estado": "/run/valtexa/navegacao.json", "parada": "/run/valtexa/parar.json", "missao": "/run/valtexa/missao.json"},
+  "armazenamento": {"cota_bytes": 400000000000},
+  "rede": {
+    "modo": "base",
+    "nome": "RT-0001",
+    "base_pub": "<pública X25519 da base, em hex: valtexa-base chave>",
+    "chave": "/var/lib/valtexa-rover/enlace.key",
+    "fila": "/var/lib/valtexa-rover/enlace.db",
+    "estado": "/run/valtexa/enlace.json",
+    "tolerancia_s": 2.0,
+    "enlaces": [
+      {"nome": "subghz", "bind": "10.20.0.2:47800", "destino": "10.20.0.1:47800", "banda_bps": 250000, "mtu": 1200},
+      {"nome": "alta",   "bind": "10.30.0.2:47800", "destino": "10.30.0.1:47800", "banda_bps": 20000000, "mtu": 1200},
+      {"nome": "4g",     "bind": "0.0.0.0:47802",   "destino": "<a definir: IPv6 da base pela Starlink ou relé na nuvem>:47802", "banda_bps": 2000000, "mtu": 1200}
+    ]
+  },
+  "tegrastats": true
+}
