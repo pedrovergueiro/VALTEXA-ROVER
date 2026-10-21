@@ -26,6 +26,8 @@ from PIL import Image
 
 from valtexa_rover.clock import Clock
 from valtexa_rover.ensaios.estatistica import GRAVIDADE_PADRAO, RAIO_TERRA_M
+from valtexa_rover.ensaios.relogio import FonteDoRelogio
+from valtexa_rover.hal import relogio as chrony
 from valtexa_rover.hal.interfaces import (
     DeviceInfo,
     Frame,
@@ -327,6 +329,17 @@ class _RedeDesligada:
         return DeviceInfo("rede", "sem rede", True)
 
 
+def chrony_de_bancada(offset_s: float = -0.0000025, fonte: str = "PPS"):
+    """SIMULAÇÃO: o que o ``chronyc -c`` diria com o GNSS/PPS travado (formato do chrony 4.x).
+
+    ``offset_s`` e ``fonte`` (``"PPS"``, ``"GPS"``, um servidor NTP...) injetam defeito."""
+    tracking = (f"50505300,{fonte},1,1791000000.123,{offset_s:.9f},0.000000400,0.000001100,"
+                "-12.345,0.001,0.010,0.000000001,0.000010000,16.0,Normal\n")
+    marca = "#" if fonte.isupper() else "^"
+    sources = f"{marca},*,{fonte},0,4,377,10,0.000000010,0.000000012,0.000000100\n"
+    return lambda: chrony.le_chrony(lambda a: tracking if a[-1] == "tracking" else sources)
+
+
 def bancada(pasta: Path, clock: Clock, *, cameras: int = 8, falhas: dict | None = None
             ) -> tuple[Hardware, dict[str, Any]]:
     """O Rover V3 de bancada inteiro, simulado: ``(hardware, fontes)``.
@@ -334,7 +347,8 @@ def bancada(pasta: Path, clock: Clock, *, cameras: int = 8, falhas: dict | None 
     ``falhas`` injeta defeitos por peça, ex.: ``{"camera": {"falha_em": [3]},
     "gnss": {"tempo_fix_s": 500}, "imu": {"eixos_trocados": True},
     "navegacao": {"confirma": False}, "termica": {"throttle_c": 50},
-    "rede": {"perde_em": {0, 1}}}``. ``camera`` vale para todas; ``camera:<n>`` para uma.
+    "rede": {"perde_em": {0, 1}}, "relogio": {"offset_s": 0.5}}``. ``camera`` vale para
+    todas; ``camera:<n>`` para uma.
     """
     falhas = falhas or {}
     pasta.mkdir(parents=True, exist_ok=True)
@@ -356,7 +370,8 @@ def bancada(pasta: Path, clock: Clock, *, cameras: int = 8, falhas: dict | None 
         system=SimulatedSystemMonitor(),
     )
     fontes = {"termica": termica, "carga": CargaDeBancada(clock, termica),
-              "rede": RedeDeBancada(clock, **falhas.get("rede", {}))}
+              "rede": RedeDeBancada(clock, **falhas.get("rede", {})),
+              "relogio": FonteDoRelogio(le_chrony=chrony_de_bancada(**falhas.get("relogio", {})))}
     return hardware, fontes
 
 

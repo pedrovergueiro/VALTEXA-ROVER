@@ -5,10 +5,10 @@ Cada ensaio mede uma peça e devolve um laudo com critérios e amostras brutas (
 e cancelamento; o laço do Runtime continua (telemetria, comandos, controle remoto).
 
 Catálogo (:data:`CATALOGO`): ``calor``, ``cameras``, ``profundidade``, ``gnss``, ``imu``,
-``rede``, ``energia`` (FASE 0); ``parada``, ``homem_morto`` (FASE 1); ``enlace_rssi``,
-``enlace_latencia``, ``enlace_troca``, ``enlace_starlink``, ``enlace_energia_base``,
-``enlace_travessia``, ``relogio`` (FASE ENLACE, nº 6 — :mod:`.enlace`). A FASE 5
-(validação agronômica) é calculada na plataforma, a partir da validação de campo.
+``rede``, ``energia``, ``relogio`` (FASE 0); ``parada``, ``homem_morto`` (FASE 1). A FASE 5
+(validação agronômica) é calculada na plataforma, a partir da validação de campo. Os
+ensaios ``enlace_*`` (rádio da fazenda) foram arquivados com a base em 20/10/2026
+(``archive/legacy/radio-fazenda/``).
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ from valtexa_rover.ensaios.base import (
 from valtexa_rover.ensaios.calor import Calor
 from valtexa_rover.ensaios.cameras import Cameras
 from valtexa_rover.ensaios.energia import Energia, SensoresComoEnergia
-from valtexa_rover.ensaios.enlace import ENSAIOS_DE_ENLACE, FonteDoEnlace
 from valtexa_rover.ensaios.gnss import Gnss
 from valtexa_rover.ensaios.imu import Imu
 from valtexa_rover.ensaios.profundidade import Profundidade
 from valtexa_rover.ensaios.rede import Rede
+from valtexa_rover.ensaios.relogio import FonteDoRelogio, Relogio
 from valtexa_rover.ensaios.seguranca import HomemMorto, Parada
 from valtexa_rover.hal.interfaces import Hardware
 
@@ -43,8 +43,8 @@ __all__ = ["CATALOGO", "FASE0", "Contexto", "Ensaio", "EnsaioCancelado",
            "catalogo", "fontes_do_runtime", "rodar", "rodar_por_nome"]
 
 CATALOGO: dict[str, type[Ensaio]] = {
-    e.nome: e for e in (Calor, Cameras, Profundidade, Gnss, Imu, Rede, Energia, Parada,
-                        HomemMorto, *ENSAIOS_DE_ENLACE)
+    e.nome: e for e in (Calor, Cameras, Profundidade, Gnss, Imu, Rede, Energia, Relogio, Parada,
+                        HomemMorto)
 }
 FASE0 = ("cameras", "gnss", "imu", "rede", "calor", "energia")
 """Os ensaios da FASE 0 que rodam sozinhos (profundidade pede a trena do operador)."""
@@ -118,14 +118,12 @@ class _RedeDoRobo:
 
 def fontes_do_runtime(core) -> dict[str, Any]:
     """As fontes extras de um Runtime de verdade (o que existir neste robô)."""
-    fontes: dict[str, Any] = {"rede": _RedeDoRobo(core.client)}
+    fontes: dict[str, Any] = {"rede": _RedeDoRobo(core.client),
+                              "relogio": FonteDoRelogio(core)}
     if core.engine.loaded and core.hardware.cameras:
         fontes["carga"] = _CargaDoMotor(core)
     if core.hardware.system is not None:
         fontes["termica"] = _TermicaDoMonitor(core.hardware.system)
-    servico = getattr(core.hardware.network, "servico", None)
-    if servico is not None:  # rede via base: os ensaios de enlace têm o que medir
-        fontes["enlace"] = FonteDoEnlace(servico, core)
     sensores = core.hardware.sensors
     if sensores is not None:
         with contextlib.suppress(Exception):

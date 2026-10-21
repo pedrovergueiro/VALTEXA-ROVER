@@ -82,9 +82,11 @@ class FolderArtifactSource:
         return True
 
 
-EXTRAS = (".labels.json", ".categories.json", ".edge.json", ".head.npz", ".encoder.onnx")
+EXTRAS = (".labels.json", ".categories.json", ".edge.json", ".head.npz", ".encoder.onnx",
+          ".head.provenance.json", ".novidade.npz", ".quality.json", ".conformal.json")
 """Arquivos que viajam ao lado do ``<sha>.onnx``. ``.head.npz`` e ``.encoder.onnx`` (a torre
-de visão do SigLIP 2, ~355 MB) só existem nos modelos com cabeça — o café."""
+de visão do SigLIP 2, ~355 MB) só existem nos modelos com cabeça — o café;
+``.head.provenance.json``, só com cabeça adaptada no campo (sem ela, adaptada não roda)."""
 
 
 def stage_model(onnx: Path | str, folder: Path | str, engine: EdgeAIEngine, *,
@@ -208,7 +210,9 @@ class ModelManager:
     @staticmethod
     def _marca_dos_extras(destino: Path) -> str | None:
         """Hash do perfil e da cabeça que viajam ao lado do ONNX (mudam sem mudar o ONNX)."""
-        partes = [file_sha256(destino.with_suffix(x)) for x in (".edge.json", ".head.npz")
+        partes = [file_sha256(destino.with_suffix(x))
+                  for x in (".edge.json", ".head.npz", ".head.provenance.json",
+                            ".novidade.npz", ".quality.json", ".conformal.json")
                   if destino.with_suffix(x).exists()]
         return ":".join(partes) or None
 
@@ -282,7 +286,10 @@ class ModelManager:
             {"model_key": pacote.model_key, "version": pacote.version, "sha256": pacote.sha256,
              "previous": registrado.get("version") and
              f"{registrado.get('model_key')}@{registrado.get('version')}",
-             "artifact_kind": pacote.artifact_kind, "dnaty_version": pacote.dnaty_version},
+             "artifact_kind": pacote.artifact_kind, "dnaty_version": pacote.dnaty_version,
+             **({"head_provenance": {k: self.engine.procedencia.get(k) for k in (
+                 "tipo", "rodada", "escopo", "cabeca", "cabeca_base", "aprovado_por")}}
+                if self.engine.procedencia else {})},
             mission_id=mission_id,
         )
         return pacote

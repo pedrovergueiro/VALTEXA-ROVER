@@ -61,6 +61,8 @@ def etapas_fase0() -> list[Etapa]:
         Etapa("IMU parada", "imu", {"duracao_s": 30},
               instrucao="robô parado, nivelado (bolha) ou com a inclinação informada"),
         Etapa("rede até a plataforma", "rede", {"pings": 10, "carga_kb": 64}),
+        Etapa("relógio (chrony com GNSS)", "relogio", {},
+              instrucao="GNSS com fix e PPS ligado; chrony rodando com deploy/chrony/"),
         Etapa("calor (2 h)", "calor", {"duracao_min": 120, "janela_s": 60},
               instrucao="gabinete fechado, modelo de café ativo"),
         Etapa("bateria e energia", "energia", {"duracao_min": 1}),

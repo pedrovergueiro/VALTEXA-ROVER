@@ -9,7 +9,9 @@ Tipos: ``diagnostico`` (laudo de cada peça, com foto reduzida de cada câmera s
 ``foto`` (uma câmera), ``modo`` (autonomo | manual | pausado | parado, para a navegação),
 ``parar``, ``config`` (troca parte do ``rover.json`` — validada, troca atômica com
 backup, vale ao reiniciar o serviço, como no OTA), ``recarregar_modelos`` (modelo fixado
-pela equipe), ``reiniciar``, ``ensaio`` e ``ensaio_cancelar``.
+pela equipe), ``reiniciar``, ``ensaio``, ``ensaio_cancelar``, ``liberar_retidos`` (volta à
+fila o que o orçamento de dados reteve no disco: ``{"motivo"?, "record_ids"?, "maximo"?}``)
+e ``orcamento`` (o consumo de dados do dia, com o que espera e o que está retido).
 
 **Ensaio.** ``ensaio`` (``{"ensaio": "gnss", "params": {...}}``) roda numa thread
 (:mod:`valtexa_rover.ensaios`): o comando fica "em execução" na plataforma, o progresso
@@ -193,6 +195,25 @@ class CommandExecutor:
             if motivo:
                 raise RuntimeError(motivo)
         return {"active_model": self.core.store.get("active_model")}
+
+    def _cmd_liberar_retidos(self, params: dict) -> dict:
+        from valtexa_rover.runtime.orcamento import MOTIVOS
+
+        motivo = params.get("motivo")
+        if motivo is not None and motivo not in MOTIVOS:
+            raise ValueError(f"motivo desconhecido: {motivo!r} (use {', '.join(MOTIVOS)}).")
+        ids = params.get("record_ids")
+        if ids is not None and (not isinstance(ids, list)
+                                or not all(isinstance(i, str) for i in ids) or len(ids) > 500):
+            raise ValueError("record_ids: lista de até 500 textos.")
+        maximo = int(params.get("maximo", 100))
+        if not 1 <= maximo <= 5000:
+            raise ValueError("maximo entre 1 e 5000.")
+        n = self.core.orcamento.liberar_retidos(motivo=motivo, record_ids=ids, maximo=maximo)
+        return {"liberados": n, "relatorio": self.core.orcamento.relatorio()}
+
+    def _cmd_orcamento(self, params: dict) -> dict:
+        return self.core.orcamento.relatorio(params.get("dia"))
 
     def _cmd_reiniciar(self, params: dict) -> dict:
         if self.ensaios.ocupado is not None:

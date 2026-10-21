@@ -34,6 +34,7 @@ Montagem: ``valtexa-rover servico --hal valtexa_rover.hal.rover_v3:hal_rover_v3`
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -41,8 +42,9 @@ import re
 import shutil
 import subprocess
 import threading
-from dataclasses import dataclass
-from datetime import datetime
+import time
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -401,21 +403,41 @@ def depth_median_mm(depth: np.ndarray, roi: float = 0.5) -> float | None:
     return float(np.median(validos))
 
 
+def reduce_depth(depth: np.ndarray, lado: int) -> np.ndarray:
+    """O mapa com lado maior até ``lado``, por amostragem (nunca média: ver ``apply_depth``)."""
+    passo = max(1, -(-max(depth.shape[:2]) // lado))
+    return np.ascontiguousarray(depth[::passo, ::passo])
+
+
 class OakDCamera:
     """Uma OAK-D Pro W PoE: foto parada de 12 MP (JPEG no próprio sensor) + profundidade.
 
     Pipeline ``depthai`` 2.x: ``ColorCamera`` (12 MP) → ``VideoEncoder`` MJPEG para a foto
     parada; ``MonoCamera`` L/R → ``StereoDepth`` alinhada à RGB para a distância. A cada
-    ``capture()`` pede uma foto parada e lê o último mapa de profundidade.
+    ``capture()`` pede uma foto parada e lê o último mapa de profundidade: a mediana do
+    centro vira ``distance_mm`` e o mapa, reduzido e com a mesma correção de lente da foto,
+    vai em ``Frame.depth`` (a Edge AI separa planta de fundo com ele).
+
+    **Profundidade curta** (``profundidade_curta``, padrão ligado): a câmera fica a ~27 cm da
+    saia do café, e a distância mínima que o estéreo mede cai com a disparidade estendida e
+    as monos em 400P (ordem de 20 cm, pela documentação da Luxonis para a Pro W). Sem isso o
+    mapa sai quase vazio nessa distância e a Edge AI corta pela distância padrão do perfil.
+
+    **Percepção ativa** (:meth:`capture_region`): exposição — e foco, com ``autofoco`` —
+    medidos numa região da foto, depois volta ao quadro inteiro.
 
     **Não rodou numa OAK-D real** (ver o cabeçalho do módulo): o primeiro teste em bancada
-    deve conferir a fila ``still`` e o alinhamento da profundidade.
+    deve conferir a fila ``still``, o alinhamento da profundidade (sobrepor o mapa à foto,
+    com e sem a correção de lente no mapa) e se a região da exposição obedece.
     """
 
     def __init__(self, camera_id: str, ip: str, camera_height_mm: float,
                  clock: Clock | None = None, fps: float = 5.0, timeout_s: float = 3.0,
                  dai: Any | None = None, side: str | None = None,
-                 resolution: str = "THE_12_MP", undistort: bool = True) -> None:
+                 resolution: str = "THE_12_MP", undistort: bool = True,
+                 short_range: bool = True, autofocus: bool = False,
+                 exposure_wait_s: float = 0.25, depth_side_px: int = 320,
+                 undistort_depth: bool = True) -> None:
         if side not in (None, "left", "right"):
             raise ValueError(f"OAK-D {camera_id}: lado {side!r} (use left ou right)")
         self.side = side
@@ -425,6 +447,12 @@ class OakDCamera:
         self.clock = clock
         self.timeout_s = timeout_s
         self.resolution = resolution
+        self.short_range = short_range
+        self.autofocus = autofocus
+        """A Pro W sai de fábrica em foco fixo na maioria das versões: conferir o módulo."""
+        self.exposure_wait_s = exposure_wait_s
+        self.depth_side_px = depth_side_px
+        self.undistort_depth = undistort_depth
         self._indice = 0
         self.undistorter = None
         self.lens_error: str | None = None
@@ -501,6 +529,13 @@ class OakDCamera:
         estereo = p.create(dai.node.StereoDepth)
         estereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
         estereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
+        if self.short_range:
+            for mono in (esq, dir_):
+                mono.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+            estereo.setExtendedDisparity(True)
+        largura, altura = self._tamanho_foto()
+        # Mapa na proporção da foto (4:3 no 12 MP): os recortes caem nos mesmos lugares.
+        estereo.setOutputSize(640, round(640 * altura / largura / 2) * 2)
         esq.out.link(estereo.left)
         dir_.out.link(estereo.right)
         saida_prof = p.create(dai.node.XLinkOut)
@@ -538,12 +573,56 @@ class OakDCamera:
 
             with Image.open(io.BytesIO(dados)) as img:
                 largura, altura = img.size
-        distancia = None if prof is None else depth_median_mm(np.asarray(prof.getFrame()))
+        distancia, mapa = None, None
+        if prof is not None:
+            bruto = np.asarray(prof.getFrame())
+            distancia = depth_median_mm(bruto)
+            if bruto.ndim == 2 and bruto.size:
+                mapa = reduce_depth(bruto, self.depth_side_px)
+                if self.undistorter is not None and self.undistort_depth:
+                    mapa = self.undistorter.apply_depth(mapa)
         self._indice += 1
         quando = self.clock.now() if self.clock else datetime.now(UTC)
         return Frame(self.camera_id, self._indice, quando, dados, "image/jpeg", largura, altura,
                      source=f"oak-d:{self.ip}", distance_mm=distancia,
-                     camera_height_mm=self.camera_height_mm, side=self.side, hfov_deg=hfov)
+                     camera_height_mm=self.camera_height_mm, side=self.side, hfov_deg=hfov,
+                     depth=mapa)
+
+    def capture_region(self, region: tuple[float, float, float, float],
+                       distance_mm: float | None = None) -> Frame:
+        """Foto parada com a exposição (e o foco, com ``autofoco``) medida em ``region``.
+
+        ``region`` em fração da foto corrigida; na borda de uma lente de 127° a região do
+        sensor é um pouco outra, o que basta para a exposição. Depois da foto, a exposição
+        volta ao quadro inteiro — a próxima captura do ritmo da missão não herda a região.
+        ``distance_mm`` fica para câmeras de foco manual (a Pro W de foco fixo o ignora).
+        **Não rodou numa OAK-D real.**
+        """
+        dai = self._dai
+        largura, altura = self._tamanho_foto()
+        x0, y0, x1, y1 = (min(max(float(v), 0.0), 1.0) for v in region)
+        x, y = int(x0 * largura), int(y0 * altura)
+        w = max(16, min(largura - x, int((x1 - x0) * largura)))
+        h = max(16, min(altura - y, int((y1 - y0) * altura)))
+        pedido = dai.CameraControl()
+        pedido.setAutoExposureRegion(x, y, w, h)
+        if self.autofocus:
+            pedido.setAutoFocusRegion(x, y, w, h)
+            pedido.setAutoFocusTrigger()
+        try:
+            self._q_ctrl.send(pedido)
+        except Exception as exc:
+            raise HardwareUnavailableError(f"OAK-D {self.camera_id}: região: {exc}") from exc
+        try:
+            if self.exposure_wait_s > 0:
+                time.sleep(self.exposure_wait_s)  # a exposição converge em alguns quadros
+            quadro = self.capture()
+        finally:
+            volta = dai.CameraControl()
+            volta.setAutoExposureRegion(0, 0, largura, altura)
+            with contextlib.suppress(Exception):  # a próxima captura avisa se a câmera caiu
+                self._q_ctrl.send(volta)
+        return replace(quadro, view="regiao")
 
     def capture_preview(self, lado: int = 640, qualidade: int = 70
                         ) -> tuple[bytes, int, int, datetime]:
@@ -682,6 +761,45 @@ class NavegacaoPorArquivo:
         except (OSError, ValueError):
             return None
 
+    @property
+    def pausa_path(self) -> Path:
+        """``percepcao.json``: pedido de pausa curta da percepção ativa."""
+        return self.estado.with_name("percepcao.json")
+
+    def pedir_pausa(self, segundos: float, motivo: str) -> dict:
+        """Pede à navegação que pare ``segundos`` (vistas extras da percepção ativa).
+
+        Só vale se a pilha de navegação ler ``percepcao.json`` (``pause_until``); o protocolo
+        com a navegação ainda não está definido, então o padrão do ``rover.json`` é não pedir
+        (``percepcao_ativa.pedir_pausa_s = 0``). Vencido ``pause_until``, a navegação segue.
+        """
+        agora = self._agora()
+        pedido = {"pause_until": (agora + timedelta(seconds=float(segundos))).isoformat(),
+                  "seconds": float(segundos), "reason": motivo, "at": agora.isoformat()}
+        self._escrever(self.pausa_path, pedido)
+        return pedido
+
+    @property
+    def velocidade_path(self) -> Path:
+        """``velocidade.json``: pedido de redução de velocidade da percepção ativa."""
+        return self.estado.with_name("velocidade.json")
+
+    def pedir_velocidade(self, fator: float, segundos: float, motivo: str) -> dict:
+        """Pede à navegação que ande a ``fator`` da velocidade por ``segundos``.
+
+        Como a pausa, só vale se a pilha de navegação ler ``velocidade.json``
+        (``factor``, ``until``) — e ela decide: o pedido é um teto, nunca uma ordem de
+        andar. O Runtime só pede quando o estado publicado diz que pode (modo autônomo, sem
+        obstáculo, fora de travessia, ``reducao_permitida``); vencido ``until``, a
+        navegação volta ao normal.
+        """
+        agora = self._agora()
+        pedido = {"factor": float(fator),
+                  "until": (agora + timedelta(seconds=float(segundos))).isoformat(),
+                  "seconds": float(segundos), "reason": motivo, "at": agora.isoformat()}
+        self._escrever(self.velocidade_path, pedido)
+        return pedido
+
     def teleop(self, v: float, w: float, valid_until: str | None, seq: int = 0) -> None:
         """Ponto de ajuste para a navegação/motores. Vencido ``valid_until``, ela para
         (homem-morto) — o Runtime também escreve zero quando o ponto some."""
@@ -692,6 +810,37 @@ class NavegacaoPorArquivo:
         return DeviceInfo("controller", "navegação por arquivo", simulated=False,
                           detail={"estado": str(self.estado), "parada": str(self.parada),
                                   "missao": str(self.missao)})
+
+
+class LuzPorArquivo:
+    """Luz auxiliar por arquivo (``/run/valtexa/luz.json``): o driver do LED lê e aplica.
+
+    **NÃO TESTADO EM HARDWARE.** A OAK-D Pro W tem iluminação infravermelha (para a
+    profundidade à noite), que não clareia a foto colorida; a luz branca da percepção ativa
+    é um LED à parte, com driver próprio (PWM por GPIO, por exemplo). Este adaptador só
+    escreve o nível pedido, de forma atômica, como os outros pedidos à navegação.
+    """
+
+    def __init__(self, caminho: Path) -> None:
+        self.caminho = Path(caminho)
+        self._nivel = 0.0
+
+    def level(self) -> float:
+        return self._nivel
+
+    def set_level(self, nivel: float) -> float:
+        self._nivel = min(1.0, max(0.0, float(nivel)))
+        self.caminho.parent.mkdir(parents=True, exist_ok=True)
+        temporario = self.caminho.with_suffix(".tmp")
+        temporario.write_text(json.dumps({"nivel": self._nivel,
+                                          "at": datetime.now(UTC).isoformat()}),
+                              encoding="utf-8")
+        os.replace(temporario, self.caminho)
+        return self._nivel
+
+    def describe(self) -> DeviceInfo:
+        return DeviceInfo("luz", "luz auxiliar por arquivo (driver externo)", False,
+                          {"arquivo": str(self.caminho), "nivel": self._nivel})
 
 
 # ---------------------------------------------------------------------------------------------
@@ -719,7 +868,11 @@ def hal_rover_v3(*, dados: Path, url: str, clock: Clock, **fabricas: Any) -> Har
         lambda c: OakDCamera(c["id"], c["ip"], float(c["altura_mm"]), clock=clock,
                              fps=float(c.get("fps", 5.0)), side=c.get("lado"),
                              resolution=c.get("resolucao", "THE_12_MP"),
-                             undistort=bool(c.get("corrigir_lente", True))))
+                             undistort=bool(c.get("corrigir_lente", True)),
+                             short_range=bool(c.get("profundidade_curta", True)),
+                             autofocus=bool(c.get("autofoco", False)),
+                             exposure_wait_s=float(c.get("espera_exposicao_s", 0.25)),
+                             undistort_depth=bool(c.get("corrigir_lente_profundidade", True))))
     fazer_gnss = fabricas.get("gnss") or (
         lambda g: NmeaGnss(g["porta"], int(g.get("baud", 115200)), clock=clock))
     fazer_imu = fabricas.get("imu") or (
@@ -736,12 +889,14 @@ def hal_rover_v3(*, dados: Path, url: str, clock: Clock, **fabricas: Any) -> Har
         validade_s=nav.get("validade_s"))
     cota = cfg.get("armazenamento", {}).get("cota_bytes")
     rede_cfg = cfg.get("rede", {})
-    if rede_cfg.get("modo") == "base":  # rádio da fazenda: a nuvem está do outro lado da base
-        from valtexa_rover.hal.rede_base import rede_via_base
-
-        rede = rede_via_base(rede_cfg, Path(dados))
-    else:
-        rede = HttpNetwork(url, timeout_s=float(rede_cfg.get("timeout_s", 30.0)))
+    if rede_cfg.get("modo", "direto") != "direto":
+        # A rede "via base" (rádio da fazenda) foi arquivada em 20/10/2026: cada Rover fala
+        # com a plataforma pela própria Starlink (archive/legacy/radio-fazenda/). Um
+        # hardware.json antigo com "modo": "base" falha aqui, em vez de cair calado no HTTPS.
+        raise HardwareUnavailableError(
+            f"hardware.json: rede.modo {rede_cfg.get('modo')!r} não existe mais; "
+            "use HTTPS direto pela Starlink (tire o campo 'modo' ou use 'direto').")
+    rede = HttpNetwork(url, timeout_s=float(rede_cfg.get("timeout_s", 30.0)))
     return Hardware(
         cameras=cameras,
         gps=fazer_gnss(cfg["gnss"]),

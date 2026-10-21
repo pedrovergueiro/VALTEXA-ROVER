@@ -131,6 +131,26 @@ class Undistorter:
             return cv2.remap(rgb, a, b, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
         return _remap_bilinear(rgb, a, b)
 
+    def apply_depth(self, depth: np.ndarray) -> np.ndarray:
+        """O mapa de profundidade alinhado à foto da lente → alinhado à foto corrigida.
+
+        Vizinho mais próximo, nunca interpolação: a média entre a borda de uma folha (300 mm)
+        e o fundo (3 m) é uma profundidade que não existe. Fora da câmera ideal, 0 (sem
+        medida). O mapa pode estar em outra resolução: o mapa de correção acompanha.
+        """
+        altura, largura = depth.shape[:2]
+        tipo, a, b = self._mapa(largura, altura)
+        if tipo == "cv2":
+            import cv2
+
+            return cv2.remap(depth, a, b, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
+        x = np.rint(a).astype(np.int64)
+        y = np.rint(b).astype(np.int64)
+        dentro = (x >= 0) & (y >= 0) & (x < largura) & (y < altura)
+        saida = np.zeros_like(depth)
+        saida[dentro] = depth[y[dentro], x[dentro]]
+        return saida
+
     def apply_jpeg(self, dados: bytes, quality: int = 92) -> tuple[bytes, int, int]:
         """O JPEG da câmera, corrigido e recodificado: ``(bytes, largura, altura)``."""
         from PIL import Image

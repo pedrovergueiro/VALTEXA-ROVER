@@ -106,7 +106,9 @@ def modelo(base: ModeloDeCanal, q: dict) -> ModeloDeCanal:
 def amostras_de_levantamento(t: Talhao, *, v_ms: float = 0.8, passo_s: float = 1.0,
                              ruas: range | None = None, no: str = "RT-0001") -> list[dict]:
     """O que o registrador do Rover gravaria percorrendo o talhão (para testar a análise)."""
-    from datetime import UTC, datetime, timedelta
+    from datetime import datetime, timedelta
+
+    from valtexa_rover._compat import UTC
 
     t0 = datetime(2026, 10, 9, 8, 0, tzinfo=UTC)
     saida = []

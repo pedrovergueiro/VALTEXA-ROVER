@@ -14,7 +14,6 @@ contato (frota).
 
 from __future__ import annotations
 
-import json
 import uuid
 
 from valtexa_rover._compat import StrEnum
@@ -45,6 +44,9 @@ class EventType(StrEnum):
     OTA_ROLLED_BACK = "OTA_ROLLED_BACK"
     OTA_REJECTED = "OTA_REJECTED"
     OTA_FAILED = "OTA_FAILED"
+    # Orçamento de dados (Starlink do Rover): tempestade de eventos e teto do dia
+    EVENT_STORM = "EVENT_STORM"
+    DATA_BUDGET = "DATA_BUDGET"
 
 
 SEVERIDADE_PADRAO = {
@@ -130,10 +132,3 @@ def enqueue_record(store: LocalStore, clock: Clock, corpo: dict, priority: Prior
              clock.now().isoformat(), seq),
         )
     return digest
-
-
-def load_record(store: LocalStore, record_id: str) -> tuple[dict, str] | None:
-    linhas = store.query("SELECT payload, sha256 FROM records WHERE id = ?", (record_id,))
-    if not linhas:
-        return None
-    return json.loads(linhas[0]["payload"]), linhas[0]["sha256"]

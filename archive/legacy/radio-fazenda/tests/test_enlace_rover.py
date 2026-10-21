@@ -9,12 +9,13 @@ import json
 import socket
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from valtexa_rover._compat import UTC
 from valtexa_rover.clock import ManualClock
 from valtexa_rover.enlace import rpc
 from valtexa_rover.enlace.bancada import ALTA, SUBGHZ, Bancada

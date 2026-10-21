@@ -104,11 +104,24 @@ class EvidenceRule:
 
     def score(self, doenca: str, probs: list[float]) -> float:
         """Média da LLR nos recortes vezes o tamanho efetivo (desconto de correlação)."""
-        n = len(probs)
+        return self.score_llr([self.tile_llr(doenca, p) for p in probs])
+
+    def score_llr(self, llrs: list[float]) -> float:
+        """O escore a partir das LLRs já calculadas (a percepção ativa funde vistas assim)."""
+        n = len(llrs)
         if n == 0:
             return 0.0
-        media = sum(self.tile_llr(doenca, p) for p in probs) / n
-        return media * n / (1.0 + (n - 1) * self.tile_correlation)
+        return sum(llrs) / n * n / (1.0 + (n - 1) * self.tile_correlation)
+
+    def margin(self) -> float:
+        """Largura da faixa de incerteza em volta do limiar de evento.
+
+        A distância entre o quase-evento e o evento, que o ``fit_edge`` mediu; sem quase-evento,
+        10% do limite da LLR (a escala do escore é a da LLR média).
+        """
+        if self.near_miss_evidence is not None and self.event_evidence > self.near_miss_evidence:
+            return self.event_evidence - self.near_miss_evidence
+        return 0.1 * self.llr_clip
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +131,11 @@ class HeadSpec:
     encoder_model_id: str
     encoder_sha256: str
     input_size: int = 224
+    head_sha256: str | None = None
+    """SHA-256 da ``.head.npz`` com que os limiares foram medidos. Com o aprendizado contínuo
+    a cabeça muda entre versões do mesmo ``.onnx``: perfil de uma cabeça com a cabeça de
+    outra daria limiares que não valem — o motor recusa. ``None`` (perfis antigos) não
+    confere."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HeadSpec:
@@ -125,13 +143,17 @@ class HeadSpec:
         if sobra:
             raise ProfileError(f"head: chave(s) desconhecida(s): {sorted(sobra)}")
         try:
+            cabeca = data.get("head_sha256")
             spec = cls(str(data["encoder_model_id"]), str(data["encoder_sha256"]).lower(),
-                       int(data.get("input_size", 224)))
+                       int(data.get("input_size", 224)),
+                       None if cabeca is None else str(cabeca).lower())
         except (KeyError, TypeError, ValueError) as exc:
             raise ProfileError(f"head: {exc}") from exc
-        if len(spec.encoder_sha256) != 64 or not all(
-                c in "0123456789abcdef" for c in spec.encoder_sha256):
-            raise ProfileError("head.encoder_sha256 deveria ser um SHA-256 em hexadecimal.")
+        for nome, valor in (("encoder_sha256", spec.encoder_sha256),
+                            ("head_sha256", spec.head_sha256)):
+            if valor is not None and (len(valor) != 64 or not all(
+                    c in "0123456789abcdef" for c in valor)):
+                raise ProfileError(f"head.{nome} deveria ser um SHA-256 em hexadecimal.")
         if spec.input_size < 32:
             raise ProfileError("head.input_size inválido.")
         return spec

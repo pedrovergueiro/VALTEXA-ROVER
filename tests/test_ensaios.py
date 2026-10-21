@@ -59,8 +59,7 @@ def test_contas_basicas() -> None:
 def test_catalogo_e_parametros(tmp_path, clock) -> None:
     nomes = {e["nome"] for e in catalogo()}
     assert nomes == {"calor", "cameras", "profundidade", "gnss", "imu", "rede", "energia",
-                     "parada", "homem_morto", "enlace_rssi", "enlace_latencia", "enlace_troca",
-                     "enlace_starlink", "enlace_energia_base", "enlace_travessia", "relogio"}
+                     "relogio", "parada", "homem_morto"}
     assert all(e["hardware_real"] for e in catalogo())  # cada um diz o que falta no real
     laudo = ensaio(tmp_path, clock, "cameras", {"fps": 999})
     assert laudo["status"] == "erro" and "fps" in laudo["erro"]

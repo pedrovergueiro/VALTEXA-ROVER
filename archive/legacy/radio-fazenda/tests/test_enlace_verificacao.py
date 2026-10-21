@@ -12,11 +12,12 @@ import os
 import secrets
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from valtexa_rover._compat import UTC
 from valtexa_rover.enlace import rpc
 from valtexa_rover.enlace.bancada import ALTA, SUBGHZ, Bancada, percentis
 from valtexa_rover.enlace.fila import DiscoCheioError, FilaCheiaError

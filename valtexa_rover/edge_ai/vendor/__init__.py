@@ -11,6 +11,10 @@ o mesmo do treino — uma divergência não dá erro, só derruba a acurácia em
 | ``onnx_runtime.py`` | ``ia/app/onnx_runtime.py`` |
 | ``rover_geometry.py`` | ``ia/app/rover.py`` (recortes de tamanho físico fixo) |
 | ``heads.py`` | ``ia/app/inference/heads.py`` (cabeça sobre o embedding da torre de visão) |
+| ``quality.py`` | ``ia/app/inference/quality.py`` (a régua da captura: nitidez, luz, contraste) |
+| ``conformal.py`` | ``ia/app/inference/conformal.py`` (conjunto de predição com garantia) |
+| ``atualizacao.py`` | ``ia/app/inference/atualizacao.py`` (tipos de atualização, procedência) |
+| ``novidade_cabeca.py`` | ``ia/app/inference/novidade_cabeca.py`` (o que a cabeça nunca viu) |
 
 ``tests/test_vendor.py`` compara o SHA-256 das duas pontas quando o ``ia/`` está
 ao lado (``ia/`` no repositório da nuvem; ``../VALTEXA-B`` com os repositórios
@@ -23,4 +27,8 @@ ORIGENS = {
     "onnx_runtime.py": "ia/app/onnx_runtime.py",
     "rover_geometry.py": "ia/app/rover.py",
     "heads.py": "ia/app/inference/heads.py",
+    "quality.py": "ia/app/inference/quality.py",
+    "conformal.py": "ia/app/inference/conformal.py",
+    "atualizacao.py": "ia/app/inference/atualizacao.py",
+    "novidade_cabeca.py": "ia/app/inference/novidade_cabeca.py",
 }

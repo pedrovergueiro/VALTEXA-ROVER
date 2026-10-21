@@ -42,6 +42,8 @@ class HealthMonitor:
         self._last_tick = clock.monotonic()
         self.sync_status: Callable[[], dict] | None = None
         """Ligado pelo Core ao Sync Engine (que nasce depois do Health Monitor)."""
+        self.dados_status: Callable[[], dict] | None = None
+        """Ligado pelo Core ao orçamento de dados: o consumo do dia vai na saúde."""
         self.missao_em_curso: Callable[[], bool] = lambda: False
         """Ligado pelo Core: sem missão, robô sem modelo carregado não está com defeito."""
         self.modelo_indisponivel: str | None = None
@@ -152,6 +154,12 @@ class HealthMonitor:
                 sincronizacao = self.sync_status()
             except Exception as exc:  # a saúde nunca derruba a telemetria
                 sincronizacao = {"error": f"{type(exc).__name__}: {exc}"}
+        dados = None
+        if self.dados_status is not None:
+            try:
+                dados = self.dados_status()
+            except Exception as exc:  # idem
+                dados = {"error": f"{type(exc).__name__}: {exc}"}
         return {
             "cpu_percent": stats.cpu_percent if stats else None,
             "memory_percent": memoria_pct,
@@ -176,6 +184,7 @@ class HealthMonitor:
             },
             "network": {"online": bool(online)},
             "sync": sincronizacao,
+            "dados": dados,
             "edge_ai": {"fps": saude["edge_ai_fps"], "latency_ms": saude["edge_ai_latency_ms"],
                         "model_loaded": self.engine.loaded},
             "simulated": sorted({i.kind for i in self.hardware.describe() if i.simulated}),

@@ -16,9 +16,8 @@ fechou a tela, o robô para de mandar sem precisar de comando.
 
 **Qualidade adaptativa:** cada quadro é um pedido síncrono; se ele demora mais que o
 intervalo pedido, o próximo sai menor (lado e qualidade JPEG descem um degrau); se sobra
-folga, sobe. No rádio lento o operador vê menos detalhe, não vídeo atrasado. Pela base
-da fazenda, cada câmera é um slot "só o último vale" (``enlace/rpc.py``): quadro velho é
-descartado no caminho.
+folga, sobe. Com a Starlink lenta (dossel, chuva) o operador vê menos detalhe, não vídeo
+atrasado.
 """
 
 from __future__ import annotations

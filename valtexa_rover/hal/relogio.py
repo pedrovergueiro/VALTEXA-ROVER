@@ -1,17 +1,17 @@
-"""Sincronia de relógio por GNSS (chrony): leitura e conferência — base e Rover.
+"""Sincronia de relógio por GNSS (chrony): leitura e conferência no Rover.
 
-O Rover V3 e a base usam o **chrony** com o GNSS como referência (ZED-F9P: NMEA pelo
-``gpsd`` + PPS no pino do Jetson/mini PC). O relógio certo importa para o enlace (validade
-dos comandos, piso assinado da hora da plataforma), para a assinatura das requisições (a
-plataforma recusa mais de 300 s de diferença) e para casar foto, GNSS e IMU.
+O Rover V3 usa o **chrony** com o GNSS como referência (ZED-F9P: NMEA pelo ``gpsd`` + PPS
+no pino do Jetson). O relógio certo importa para a validade dos comandos e o piso assinado
+da hora da plataforma, para a assinatura das requisições (a plataforma recusa mais de 300 s
+de diferença) e para casar foto, GNSS e IMU.
 
 :func:`le_chrony` roda ``chronyc -c tracking`` e ``chronyc -c sources`` e
 :func:`avalia` diz: sincronizado? por qual fonte (GNSS/PPS, NTP pela internet, nenhuma)?
-com que erro? O ensaio ``relogio`` usa isto nos dois lados (a base responde pelo enlace).
+com que erro? Usado pelo ensaio ``relogio`` (:mod:`valtexa_rover.ensaios.relogio`).
 
-Configuração: ``rover/deploy/chrony/valtexa-gnss.conf`` e ``base/deploy/chrony-base.conf``
-(``docs/COMUNICACAO_FAZENDA.md`` §11). **Não testado em hardware**: o texto do ``chronyc``
-vem da documentação do chrony 4.x; os testes usam saídas gravadas desse formato.
+Era ``enlace/relogio.py`` até o rádio da fazenda ser arquivado (20/10/2026); o conteúdo é o
+mesmo. Configuração: ``deploy/chrony/valtexa-gnss.conf``. **Não testado em hardware**: o
+texto do ``chronyc`` vem da documentação do chrony 4.x; os testes usam saídas gravadas.
 """
 
 from __future__ import annotations

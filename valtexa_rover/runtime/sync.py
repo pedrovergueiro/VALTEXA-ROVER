@@ -27,6 +27,12 @@ ordem de criação. Erros:
 * ``403`` → para a sincronização inteira (protocolo, seção 7: nunca insistir);
 * outro ``4xx`` (inclusive ``409``: mesmo ID com conteúdo diferente) → FALHOU,
   com ``UPLOAD_FAILED``. Não adianta repetir o que a nuvem recusou pelo conteúdo.
+
+**Orçamento de dados** (:mod:`valtexa_rover.runtime.orcamento`): com ele, a seleção só pega
+o que o teto deixa subir agora — prioridade 1 e eventos sempre; resultados enquanto o teto
+não acabou; arquivos até a fração da prioridade deles. O resto **espera** na fila (não perde
+tentativa, não falha). Itens ``RETIDO`` (tempestade, deduplicação, amostra) não sobem até a
+plataforma pedir.
 """
 
 from __future__ import annotations
@@ -90,6 +96,7 @@ class SyncEngine:
         *,
         versions: Callable[[], dict] | None = None,
         seed: int | None = None,
+        orcamento=None,
     ) -> None:
         self.store = store
         self.client = client
@@ -98,6 +105,8 @@ class SyncEngine:
         self.config = config
         self.versions = versions or (lambda: {})
         self._rng = random.Random(seed)
+        self.orcamento = orcamento
+        """:class:`~valtexa_rover.runtime.orcamento.OrcamentoDados` (``None``: sem teto)."""
 
     # -- estado -----------------------------------------------------------------
 
@@ -139,6 +148,10 @@ class SyncEngine:
             "oldest_pending_s": None if idade is None else round(idade, 1),
             "blocked": self.blocked,
             "last_ok_at": self.store.get("sync_last_ok_at"),
+            # orçamento de dados: o que espera o teto e o que ficou retido no disco
+            "retained": int(self.store.scalar(
+                "SELECT COUNT(*) FROM sync_queue WHERE status = 'RETIDO'") or 0),
+            "deferred": self.orcamento.adiados() if self.orcamento is not None else 0,
         }
 
     @property
@@ -196,18 +209,35 @@ class SyncEngine:
 
     # -- seleção ----------------------------------------------------------------
 
+    def _filtro_orcamento(self) -> tuple[str, tuple]:
+        """O pedaço do ``WHERE`` que o orçamento impõe agora (vazio sem orçamento)."""
+        if self.orcamento is None:
+            return "", ()
+        missao = self.orcamento.missao_ativa
+        limite = self.orcamento.prioridade_maxima(missao)
+        meta = 1 if self.orcamento.metadados_liberados(missao) else 0
+        return (" AND (q.priority <= 1 OR (q.kind = 'file' AND q.priority <= ?) OR "
+                "(q.kind = 'record' AND (COALESCE(r.kind, '') = 'event' OR ? = 1)))",
+                (limite, meta))
+
     def _next_item(self):
         agora = self.clock.monotonic()
+        filtro, params = self._filtro_orcamento()
         linhas = self.store.query(
-            "SELECT * FROM sync_queue WHERE status IN ('PENDENTE', 'ENVIANDO') "
-            "AND next_attempt_at <= ? ORDER BY priority, seq LIMIT 1",
-            (agora,),
+            "SELECT q.* FROM sync_queue q LEFT JOIN records r "
+            "ON q.kind = 'record' AND r.id = q.ref_id "
+            "WHERE q.status IN ('PENDENTE', 'ENVIANDO') "
+            f"AND q.next_attempt_at <= ?{filtro} ORDER BY q.priority, q.seq LIMIT 1",
+            (agora, *params),
         )
         return linhas[0] if linhas else None
 
     def _next_due_in(self) -> float | None:
+        filtro, params = self._filtro_orcamento()
         proximo = self.store.scalar(
-            "SELECT MIN(next_attempt_at) FROM sync_queue WHERE status IN ('PENDENTE', 'ENVIANDO')"
+            "SELECT MIN(q.next_attempt_at) FROM sync_queue q LEFT JOIN records r "
+            "ON q.kind = 'record' AND r.id = q.ref_id "
+            f"WHERE q.status IN ('PENDENTE', 'ENVIANDO'){filtro}", params
         )
         if proximo is None:
             return None
@@ -217,15 +247,25 @@ class SyncEngine:
 
     def _send_records(self, primeiro, rel: SyncReport) -> None:
         agora = self.clock.monotonic()
+        filtro, params = self._filtro_orcamento()
         itens = self.store.query(
-            "SELECT q.id AS qid, q.attempts, r.id, r.kind, r.type, r.sha256, r.payload "
-            "FROM sync_queue q JOIN records r ON r.id = q.ref_id "
+            "SELECT q.id AS qid, q.attempts, r.id, r.kind, r.type, r.sha256, r.payload, "
+            "r.mission_id FROM sync_queue q JOIN records r ON r.id = q.ref_id "
             "WHERE q.kind = 'record' AND q.status IN ('PENDENTE', 'ENVIANDO') "
-            "AND q.priority = ? AND q.next_attempt_at <= ? ORDER BY q.seq LIMIT ?",
-            (primeiro["priority"], agora, self.config.batch_size),
+            f"AND q.priority = ? AND q.next_attempt_at <= ?{filtro} ORDER BY q.seq LIMIT ?",
+            (primeiro["priority"], agora, *params, self.config.batch_size),
         )
         if not itens:
             return
+        with self._atribuido(itens[0]["mission_id"]):
+            self._send_records_lote(itens, rel)
+
+    def _atribuido(self, mission_id: str | None):
+        if self.orcamento is None:
+            return contextlib.nullcontext()
+        return self.orcamento.atribuir(mission_id)
+
+    def _send_records_lote(self, itens, rel: SyncReport) -> None:
         corpo = {
             "records": [
                 {"id": i["id"], "kind": i["kind"], "type": i["type"], "sha256": i["sha256"],
@@ -234,7 +274,8 @@ class SyncEngine:
             ],
             "remaining": max(0, self.pending() - len(itens)),
         }
-        resposta = self._request("POST", "/v1/device/edge/records", rel, json_body=corpo)
+        resposta = self._request("POST", "/v1/device/edge/records", rel, json_body=corpo,
+                                 gzip_body=self.config.comprimir_registros)
         por_qid = {i["id"]: i for i in itens}
         if resposta.status != 200:
             self._falha_ou_retry([i["qid"] for i in itens], [i["attempts"] for i in itens],
@@ -264,6 +305,13 @@ class SyncEngine:
     # -- arquivos ---------------------------------------------------------------
 
     def _send_file(self, item, rel: SyncReport, max_requests: int) -> None:
+        missao = self.store.scalar(
+            "SELECT r.mission_id FROM files f JOIN records r ON r.id = f.record_id "
+            "WHERE f.id = ?", (item["ref_id"],))
+        with self._atribuido(missao):
+            self._send_file_item(item, rel, max_requests)
+
+    def _send_file_item(self, item, rel: SyncReport, max_requests: int) -> None:
         linhas = self.store.query("SELECT * FROM files WHERE id = ?", (item["ref_id"],))
         if not linhas:
             self._marca(item["id"], "FALHOU", "arquivo removido pela retenção")

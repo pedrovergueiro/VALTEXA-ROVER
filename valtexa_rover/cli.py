@@ -18,10 +18,10 @@
   sincroniza, OTA fora de missão. ``--hal`` aponta a função que monta a
   :class:`~valtexa_rover.hal.interfaces.Hardware` com os adapters do robô
   (``funcao(dados=Path, url=str, clock=Clock) -> Hardware``); para demonstração,
-  ``valtexa_rover.sim:hal_de_demonstracao`` (SIMULADO). Ver ``docs/ROVER_RUNTIME.md``;
-* ``valtexa-rover enlace-chave --identidade ... --chave ...`` — rádio da fazenda: cria (se
-  não existir) a chave X25519 do enlace **no robô** e imprime a pública assinada pela
-  identidade, para cadastrar na base (``docs/COMUNICACAO_FAZENDA.md``).
+  ``valtexa_rover.sim:hal_de_demonstracao`` (SIMULADO). Ver ``docs/ROVER_RUNTIME.md``.
+
+O comando ``enlace-chave`` (rádio da fazenda) foi arquivado com a base em 20/10/2026
+(``archive/legacy/radio-fazenda/``): o Rover fala com a plataforma pela própria Starlink.
 """
 
 from __future__ import annotations
@@ -77,22 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     diag.add_argument("--espera-gnss", type=float, default=5.0,
                       help="segundos esperando o primeiro fix")
     ens = sub.add_parser("ensaio", help="roda um ensaio de validação aqui, sem plataforma")
-    ens.add_argument("nome", help="cameras, profundidade, gnss, imu, parada, homem_morto, "
-                                  "energia (calor e rede: pelo centro de comando)")
+    ens.add_argument("nome", help="cameras, profundidade, gnss, imu, relogio, parada, "
+                                  "homem_morto, energia (calor e rede: pelo centro de comando)")
     ens.add_argument("--dados", required=True)
     ens.add_argument("--hal", default="valtexa_rover.hal.rover_v3:hal_rover_v3")
     ens.add_argument("--url", default="https://ensaio.invalid", help=argparse.SUPPRESS)
     ens.add_argument("--param", action="append", default=[], metavar="CHAVE=VALOR",
                      help="parâmetro do ensaio (valor em JSON: 500, true, [0.4,0.4,0.2,0.2])")
-    chave = sub.add_parser("enlace-chave", help="pública do enlace da fazenda, assinada")
-    chave.add_argument("--identidade", required=True)
-    chave.add_argument("--chave", required=True, help="ex.: /var/lib/valtexa-rover/enlace.key")
-    chave.add_argument("--publicar", metavar="URL",
-                       help="publica na plataforma (HTTPS direto, na implantação): a base da "
-                            "fazenda busca de lá, sem copiar arquivo à mão")
     args = parser.parse_args(argv)
-    if args.comando == "enlace-chave":
-        return enlace_chave(args)
     if args.comando == "ensaio":
         return ensaio_local(args)
     if args.comando == "servico":
@@ -195,15 +187,9 @@ def ensaio_local(args) -> int:
         print(json.dumps({"ok": False, "montagem": f"{type(exc).__name__}: {exc}"},
                          ensure_ascii=False))
         return 1
-    fontes = {}
-    servico = getattr(hardware.network, "servico", None)
-    if servico is not None:
-        # Rede via base: os ensaios de enlace falam com a base. Com o serviço do Runtime
-        # rodando, os dois brigariam pelas portas UDP — pare o serviço antes, ou mande o
-        # ensaio pelo console (comando assinado).
-        from valtexa_rover.ensaios.enlace import FonteDoEnlace
+    from valtexa_rover.ensaios.relogio import FonteDoRelogio
 
-        fontes["enlace"] = FonteDoEnlace(servico)
+    fontes = {"relogio": FonteDoRelogio()}
     if hardware.system is not None:
         fontes["termica"] = Termica(hardware.system)
     if hardware.sensors is not None:
@@ -284,33 +270,6 @@ def preparar_modelo(args) -> int:
     return 0
 
 
-def enlace_chave(args) -> int:
-    from valtexa_rover.enlace.cripto import ChaveDeEnlace, publica_assinada
-    from valtexa_rover.runtime.client import DeviceIdentity
-
-    identidade = DeviceIdentity.load(args.identidade)
-    k = ChaveDeEnlace.carregar_ou_criar(args.chave)
-    doc = publica_assinada(k, identidade.device_id, identidade.private_key)
-    print(json.dumps(doc))
-    if args.publicar:
-        from valtexa_rover.clock import SystemClock
-        from valtexa_rover.hal.interfaces import NetworkUnavailableError
-        from valtexa_rover.hal.local import HttpNetwork
-        from valtexa_rover.runtime.client import DeviceClient
-
-        cliente = DeviceClient(identidade, HttpNetwork(args.publicar), SystemClock())
-        try:
-            r = cliente.request("PUT", "/v1/device/enlace/chave", json_body=doc)
-        except NetworkUnavailableError as exc:
-            print(f"sem rede até a plataforma: {exc}", file=sys.stderr)
-            return 1
-        if r.status != 200:
-            print(f"plataforma recusou: HTTP {r.status} {r.body[:200]!r}", file=sys.stderr)
-            return 1
-        print("publicada na plataforma: a base da fazenda busca de lá", file=sys.stderr)
-    return 0
-
-
 def rodar_servico(args) -> int:
     """O laço do robô. SIGTERM (systemd) para com a transação do quadro fechada."""
     import contextlib
@@ -336,10 +295,6 @@ def rodar_servico(args) -> int:
                      artifact_source=FolderArtifactSource(dados / "ota" / "models"),
                      config_path=args.config)
     core.boot()
-    # Rede via base (rádio da fazenda): a política de perda de enlace age na navegação.
-    enlace = getattr(hardware.network, "servico", None)
-    if enlace is not None:
-        enlace.liga(hardware.controller)
     parar = threading.Event()
     for sinal in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(ValueError):  # fora da thread principal (testes)
@@ -347,13 +302,12 @@ def rodar_servico(args) -> int:
     from valtexa_rover.runtime.comandos import CommandExecutor
 
     comandos = CommandExecutor(core, args.config)
-    from valtexa_rover.runtime.client import DeviceClient
     from valtexa_rover.runtime.video import TransmissorDeVideo
 
     # Cliente próprio (mesma identidade, nonce próprio por pedido): o vídeo corre numa
-    # thread e nunca segura o laço da missão.
+    # thread e nunca segura o laço da missão. Conta no orçamento de dados como o resto.
     video = TransmissorDeVideo(
-        hardware, DeviceClient(core.identity, hardware.network, relogio), relogio,
+        hardware, core.novo_cliente(), relogio,
         missao_em_curso=lambda: core.missions.current() is not None,
         ocupado=lambda: comandos.ensaios.ocupado is not None,
         quadro_recente=core.ultimos_quadros.get).iniciar()
@@ -382,25 +336,6 @@ def rodar_servico(args) -> int:
                 core.log.warning("missão não aceita", extra={"data": {"motivo": str(exc)}})
         core.step()
         missao = core.missions.current()
-        if enlace is not None:
-            enlace.missao_atual = None if missao is None else {"mission_id": missao.id,
-                                                               **(missao.payload or {})}
-            # o mapa de cobertura do rádio vem assinado na missão (último levantamento)
-            enlace.cobertura_da_missao(
-                None if missao is None
-                else ((missao.payload or {}).get("command") or {}).get("cobertura"))
-            travessia = getattr(enlace, "travessia", None)
-            if travessia is not None:
-                enlace.sync_pendente = core.sync.pending()
-                if travessia.pede_sincronizar():
-                    # antes da zona morta (sobe o que dá) e na volta (sincroniza tudo já)
-                    with contextlib.suppress(NetworkUnavailableError):
-                        core.sync.step(500)
-            if hardware.gps is not None:
-                # posição para o levantamento de cobertura e a missão ciente do enlace;
-                # GNSS fora não para o laço (o enlace segue sem posição)
-                with contextlib.suppress(Exception):
-                    enlace.atualiza_posicao(hardware.gps.read())
         anunciar = getattr(hardware.controller, "announce_mission", None)
         if anunciar is not None and (missao and missao.id) != anunciada:
             anunciar(missao)  # a navegação recebe a missão (e a rota) ou None
@@ -416,8 +351,6 @@ def rodar_servico(args) -> int:
         parar.wait(args.intervalo)
     video.parar()
     core.close()
-    if enlace is not None:
-        enlace.parar()
     return codigo
 
 

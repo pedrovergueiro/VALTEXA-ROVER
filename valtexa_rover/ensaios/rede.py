@@ -34,8 +34,8 @@ class Rede(Ensaio):
         Param("vazao_min_kbps", float, 256.0, 0.0, 1e7,
               "vazão mínima de subida e de descida (kbit/s)"),
     )
-    hardware_real = ("simulado/não testado em hardware: o enlace da fazenda (4G, rádio, "
-                     "Wi-Fi) ainda não foi medido; os testes de enlace vêm na P13.")
+    hardware_real = ("simulado/não testado em hardware: a Starlink do Rover no cafezal "
+                     "ainda não foi medida.")
 
     def executar(self, ctx: Contexto, p: dict[str, Any]) -> dict[str, Any]:
         rede = ctx.fontes.get("rede")

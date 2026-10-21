@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 class HardwareUnavailableError(RuntimeError):
@@ -26,7 +26,17 @@ class HardwareUnavailableError(RuntimeError):
 
 
 class NetworkUnavailableError(ConnectionError):
-    """Sem enlace com a nuvem. O Runtime guarda tudo e tenta depois."""
+    """Sem enlace com a nuvem. O Runtime guarda tudo e tenta depois.
+
+    ``pode_ter_enviado``: a falha veio **depois** de a conexão abrir (tempo esgotado à espera
+    da resposta, conexão cortada no meio do corpo). Os bytes do pedido podem ter saído pela
+    Starlink — o orçamento de dados conta, pelo lado seguro. Recusa de conexão e falha de
+    DNS não mandam o corpo (``False``, o padrão).
+    """
+
+    def __init__(self, *args: object, pode_ter_enviado: bool = False) -> None:
+        super().__init__(*args)
+        self.pode_ter_enviado = pode_ter_enviado
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +75,14 @@ class Frame:
     hfov_deg: float | None = None
     """Campo de visão horizontal **desta** foto. Com a lente corrigida (:mod:`..lente`), é o
     efetivo da câmera ideal, e substitui o nominal do perfil no corte em recortes."""
+    depth: Any = field(default=None, compare=False, repr=False)
+    """Mapa de profundidade **alinhado a esta foto** (``numpy`` 2D, mm, 0 = sem medida),
+    reduzido (lado maior ~320 px) e com a mesma correção de lente da foto. A Edge AI separa
+    planta de fundo com ele (:mod:`valtexa_rover.edge_ai.rgbd`). ``None``: câmera sem
+    profundidade, ou o mapa não chegou a tempo."""
+    view: str = "principal"
+    """``principal`` (a captura do ritmo da missão) ou a estratégia de uma vista extra da
+    percepção ativa (``regiao``, ``repeticao``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +137,24 @@ class Camera(Protocol):
     def capture(self) -> Frame: ...
 
     def describe(self) -> DeviceInfo: ...
+
+
+@runtime_checkable
+class ActiveCamera(Protocol):
+    """Câmera que sabe olhar de novo para uma região (percepção ativa). Opcional.
+
+    ``region`` é ``(x0, y0, x1, y1)`` em fração da foto (0 a 1). A câmera mede a exposição
+    — e, se tiver foco automático, foca — naquela região, tira a foto parada e volta ao
+    quadro inteiro. ``distance_mm`` é a distância da planta, para câmeras de foco manual.
+    Quem não cumpre este contrato recebe só ``capture()`` de novo (a estratégia
+    ``repeticao``)."""
+
+    camera_id: str
+
+    def capture(self) -> Frame: ...
+
+    def capture_region(self, region: tuple[float, float, float, float],
+                       distance_mm: float | None = None) -> Frame: ...
 
 
 @runtime_checkable
@@ -207,6 +243,39 @@ class SystemMonitor(Protocol):
 
 
 @runtime_checkable
+class AuxiliaryLight(Protocol):
+    """Iluminação auxiliar da câmera (nível de 0 a 1). Opcional: a OAK-D Pro tem projetor e
+    iluminação **infravermelha**, que não ajudam a foto colorida; luz branca é hardware à parte
+    — ver ``rover_v3.LuzPorArquivo``."""
+
+    def level(self) -> float: ...
+
+    def set_level(self, nivel: float) -> float: ...
+
+    def describe(self) -> DeviceInfo: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ThermalFrame:
+    """Um quadro térmico: temperatura aparente em °C por pixel (radiométrica)."""
+
+    temperatures_c: Any
+    """``(H, W)`` em graus Celsius."""
+    captured_at: datetime
+    emissivity: float = 0.95
+
+
+@runtime_checkable
+class ThermalCamera(Protocol):
+    """Câmera térmica opcional: medida complementar da inspeção adaptativa. Não decide: a
+    diferença de temperatura da região vai como evidência ao agrônomo, marcada não calibrada
+    até haver relação medida entre temperatura e doença no café."""
+
+    def capture(self) -> ThermalFrame | None: ...
+
+    def describe(self) -> DeviceInfo: ...
+
+
 class Controller(Protocol):
     """Controlador de movimento. O Runtime de percepção só lê o estado e pede parada.
 
@@ -237,6 +306,9 @@ class Hardware:
     hardware_version: str = "desconhecido"
     system: SystemMonitor | None = None
     """Opcional: sem ele a saúde sai sem CPU/memória/acelerador (e diz que não mediu)."""
+    luz: AuxiliaryLight | None = None
+    termica: ThermalCamera | None = None
+    """Opcional: a iluminação auxiliar que a percepção ativa ajusta (:mod:`..runtime.percepcao`)."""
 
     def describe(self) -> list[DeviceInfo]:
         partes = [c.describe() for c in self.cameras]

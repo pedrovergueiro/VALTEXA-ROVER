@@ -22,7 +22,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -38,6 +38,7 @@ from valtexa_rover.hal.interfaces import (
     HardwareUnavailableError,
     NetworkUnavailableError,
 )
+from valtexa_rover.runtime import prioridades
 from valtexa_rover.runtime.buffer import CircularBuffer, EventSequence
 from valtexa_rover.runtime.client import DeviceClient, DeviceIdentity
 from valtexa_rover.runtime.events import EventEngine, EventType, enqueue_record
@@ -50,7 +51,9 @@ from valtexa_rover.runtime.mission import (
     verify_command,
 )
 from valtexa_rover.runtime.model_manager import ArtifactSource, ModelError, ModelManager
+from valtexa_rover.runtime.orcamento import OrcamentoDados
 from valtexa_rover.runtime.ota import OtaManager, OtaReport
+from valtexa_rover.runtime.percepcao import ActivePerception, Outcome
 from valtexa_rover.runtime.retention import RetentionDecision, RetentionManager, reduce_image
 from valtexa_rover.runtime.store import LocalStore
 from valtexa_rover.runtime.sync import SyncEngine, SyncReport
@@ -103,7 +106,17 @@ class RoverCore:
             rede.chave_plataforma = identity.platform_public_key
         self.client = DeviceClient(identity, hardware.network, self.clock)
         self.events = EventEngine(self.store, self.clock, identity.device_id)
-        self.engine = EdgeAIEngine(hardware.accelerator, self.config.classificacao)
+        self.orcamento = OrcamentoDados(self.store, self.clock, self.config.orcamento_dados,
+                                        self.events)
+        """Orçamento de dados pela Starlink do Rover: conta tudo o que trafega, corta pela
+        prioridade, segura a tempestade de eventos e deduplica por planta."""
+        self.client.contador = self.orcamento.contar
+        """Toda requisição do Rover passa por um cliente com este gancho
+        (:meth:`novo_cliente` para as threads com cliente próprio, como o vídeo ao vivo)."""
+        self.engine = EdgeAIEngine(hardware.accelerator, self.config.classificacao,
+                                   self.config.profundidade)
+        self.percepcao = ActivePerception(self.config.percepcao_ativa, self.clock)
+        """Percepção ativa: vistas extras quando o quadro fica na dúvida (ver o módulo)."""
         self.models = ModelManager(self.store, self.engine, self.events, artifact_source,
                                    self.client)
         self.missions = MissionManager(self.store, self.clock)
@@ -113,8 +126,10 @@ class RoverCore:
         self.health.missao_em_curso = lambda: self.missions.current() is not None
         self.telemetry = Telemetry(self.store, self.health, self.clock)
         self.sync = SyncEngine(self.store, self.client, self.events, self.clock,
-                               self.config.sync, versions=self._versions, seed=seed)
+                               self.config.sync, versions=self._versions, seed=seed,
+                               orcamento=self.orcamento)
         self.health.sync_status = self.sync.saude
+        self.health.dados_status = self._dados_na_saude
         self.ota = OtaManager(
             self.store, self.client, self.events, self.clock,
             public_key=identity.ota_public_key, device_id=identity.device_id,
@@ -139,12 +154,20 @@ class RoverCore:
 
     # -- ciclo de vida ----------------------------------------------------------
 
+    def novo_cliente(self) -> DeviceClient:
+        """Outro cliente com a mesma identidade (nonce próprio por pedido) **e** a contabilidade
+        do orçamento: o que ele mandar pela Starlink conta no dia (ex.: o vídeo ao vivo)."""
+        cliente = DeviceClient(self.identity, self.hardware.network, self.clock)
+        cliente.contador = self.orcamento.contar
+        return cliente
+
     def boot(self) -> None:
         """Recupera o disco e, se havia missão em execução, retoma (``MISSION_RESUMED``)."""
         self.recovered = self.store.recover()
         self.models.refresh()
         missao = self.missions.current()
         if missao is not None:
+            self.orcamento.nova_missao(missao.id)
             if missao.field_id:
                 self.models.activate_for_field(missao.field_id, missao.id)
             self.events.emit(
@@ -198,6 +221,10 @@ class RoverCore:
         self.health.modelo_indisponivel = None
         self.store.put("last_field_id", field_id)
         missao = self.missions.start(mission_id, field_id, payload)
+        self.orcamento.nova_missao(missao.id)
+        comando = (payload or {}).get("command") or {}
+        # O teto da plataforma vem dentro da missão assinada (conferida antes de chegar aqui).
+        self.orcamento.aplicar_da_plataforma(comando.get("orcamento_dados"))
         self.missions.set_model(missao.id, pacote.model_key, pacote.version, pacote.sha256)
         self.events.emit(
             EventType.MISSION_STARTED,
@@ -240,10 +267,13 @@ class RoverCore:
             self.events.emit(
                 EventType.MISSION_COMPLETED,
                 {"frames_done": atual.frames_done, "events": atual.events,
-                 "pending_sync": self.sync.pending()},
+                 "pending_sync": self.sync.pending(),
+                 "dados": {**self.orcamento.relatorio(),
+                           "usado_missao_bytes": self.orcamento.usado_missao(missao.id)}},
                 mission_id=missao.id,
             )
         self.buffers.clear()
+        self.orcamento.nova_missao(None)
         self.log.info("missão concluída", extra={"data": {"mission_id": missao.id}})
         if (missao.payload or {}).get("command"):
             self._report_mission("complete", missao.id)
@@ -295,7 +325,7 @@ class RoverCore:
                     continue
                 self.health.clear(f"camera:{camera.camera_id}")
                 self.ultimos_quadros[camera.camera_id] = frame
-                self._process(frame, gps, missao, rel)
+                self._process(frame, gps, missao, rel, camera)
 
         agora = self.clock.monotonic()
         vence = self._last_telemetry is None or (
@@ -331,6 +361,7 @@ class RoverCore:
             invalidar()
         if saida["pressao_enviados"] or saida["pressao_normais"]:
             self.events.emit(EventType.STORAGE_PRESSURE, saida)
+        saida["amostra_orcamento"] = self.orcamento.amostrar_adiados()
         return saida
 
     def sync_forever(self, stop: threading.Event, interval_s: float = 1.0) -> None:
@@ -341,22 +372,46 @@ class RoverCore:
 
     # -- quadro -----------------------------------------------------------------
 
-    def _process(self, frame: Frame, gps: GpsFix | None, missao, rel: StepReport) -> None:
+    def _process(self, frame: Frame, gps: GpsFix | None, missao, rel: StepReport,
+                 camera=None) -> None:
         try:
             inferencia = self.engine.infer(frame.data, frame.distance_mm,
-                                           frame.camera_height_mm, frame.hfov_deg)
+                                           frame.camera_height_mm, frame.hfov_deg,
+                                           depth=frame.depth)
         except InvalidImageError as exc:
             self._fault(f"camera:{frame.camera_id}", f"imagem ilegível: {exc}", missao.id)
             return
-        decisao = self.retention.decide(inferencia.category, inferencia.low_confidence,
+        # Na dúvida, olha de novo (vistas extras, alinhadas e fundidas). Pode trocar o quadro
+        # principal: a vista com profundidade boa substitui a que veio sem.
+        desfecho = self.percepcao.run(self.engine, camera, frame, inferencia,
+                                      self.hardware.controller,
+                                      prioridade=self._prioridade(missao, frame),
+                                      luz=self.hardware.luz,
+                                      termica=getattr(self.hardware, "termica", None))
+        frame, inferencia = desfecho.frame, desfecho.inference
+        decisao = self.retention.decide(inferencia.category,
+                                        inferencia.low_confidence or desfecho.for_validation,
                                         frame.captured_at)
+        if desfecho.for_validation:
+            decisao = replace(decisao, sampled_for_validation=True)
         result_id = str(uuid.uuid4())
         evento = inferencia.category in EVENT_CATEGORIES
         event_id = str(uuid.uuid4()) if evento else None
+        # Orçamento de dados: tempestade de eventos e deduplicação por planta decidem se o
+        # ORIGINAL do evento sobe agora ou fica retido no disco. O resultado sobe sempre.
+        self.orcamento.observa_quadro(evento)
+        motivo_reter, rebaixados = None, []
+        # Prioridade 1 (evento crítico, se o rover.json puser uma categoria lá) nunca é retida.
+        cortavel = decisao.priority > Priority.EVENTO_CRITICO
+        if evento and decisao.tier is Tier.ORIGINAL and cortavel:
+            chave = self.orcamento.dedup.chave(self._navigation(), frame.side)
+            motivo_reter, rebaixados = self.orcamento.motivo_de_reter(
+                chave, inferencia.confidence, (result_id, event_id))
+            self.orcamento.marca_evento(event_id, motivo_reter)
 
         # Os arquivos vão ao disco antes da transação (atômicos, com fsync). Se o
         # robô cair antes do commit, sobram sem linha e o boot os apaga.
-        arquivos = self._files_for(frame, decisao)
+        arquivos = self._files_for(frame, decisao) + self._view_files(desfecho, decisao)
         sequencias_prontas: list[EventSequence] = []
         with self.store.transaction() as conn:
             fila_arquivos = []
@@ -373,10 +428,14 @@ class RoverCore:
                 fila_arquivos.append((file_id, digest, tamanho, decisao.priority))
                 rel.files_bytes += tamanho
             corpo = self._result_body(result_id, frame, gps, missao, inferencia, decisao,
-                                      event_id, arquivos)
+                                      event_id, arquivos, desfecho)
+            corpo["retention"]["retido"] = motivo_reter
             enqueue_record(self.store, self.clock, corpo, decisao.priority)
             for file_id, digest, tamanho, prioridade in fila_arquivos:
-                self._enqueue_file(conn, file_id, digest, tamanho, prioridade)
+                self._enqueue_file(conn, file_id, digest, tamanho, prioridade,
+                                   retido=motivo_reter)
+            for entrada in rebaixados:
+                self.orcamento.reter(conn, entrada.record_ids, "dedup_planta")
             if evento:
                 self.events.emit(
                     EventType.IMAGE_EVENT_DETECTED,
@@ -386,6 +445,7 @@ class RoverCore:
                      "camera_id": frame.camera_id, "field_id": missao.field_id,
                      "lat": gps.lat if gps else None, "lon": gps.lon if gps else None,
                      "image_sha256": arquivos[0][2] if arquivos else None,
+                     "for_validation": desfecho.for_validation, "retido": motivo_reter,
                      "model_key": self.engine.package.model_key,
                      "model_version": self.engine.package.version},
                     mission_id=missao.id, severity="warning", priority=decisao.priority,
@@ -405,6 +465,21 @@ class RoverCore:
     NAVIGATION_KEYS = ("row_left", "row_right", "x_m", "segment_index")
     """O que a navegação diz da posição no talhão e vai no resultado (a fusão por planta usa
     a linha de cada lado e o metro ao longo dela; sem isso, a nuvem estima pelo GNSS)."""
+
+    def _prioridade(self, missao, frame: Frame) -> float | None:
+        """A prioridade do trecho que esta câmera olha (mapa da missão, Nível 4)."""
+        if missao is None:
+            return None
+        if getattr(self, "_mapa_missao", (None, None))[0] != missao.id:
+            self._mapa_missao = (missao.id,
+                                 prioridades.de_missao(missao.payload, self.clock.now()))
+        mapa = self._mapa_missao[1]
+        if mapa is None:
+            return None
+        nav = self._navigation() or {}
+        rua = nav.get("row_left") if frame.side == "left" else (
+            nav.get("row_right") if frame.side == "right" else None)
+        return mapa.prioridade(None if rua is None else str(rua), nav.get("x_m"))
 
     def _navigation(self) -> dict | None:
         if self.hardware.controller is None:
@@ -434,6 +509,23 @@ class RoverCore:
                  "boxes": [list(t.box) for t in inf.tiles],
                  "heights_mm": [t.height_mm for t in inf.tiles],
                  "zones": [list(t.zones) for t in inf.tiles]}
+        if any(t.depth_mm is not None for t in inf.tiles):
+            corpo["depth_mm"] = [t.depth_mm for t in inf.tiles]
+            corpo["plant_fraction"] = [t.plant_fraction for t in inf.tiles]
+        if inf.rgbd is not None:
+            corpo["excluded_by_depth"] = inf.excluded_tiles
+        # Nível 2 (5.2, 5.3): a régua da captura, o conjunto conformal e a geometria 3D de
+        # cada recorte, quando o motor mediu — a nuvem põe a lesão no referencial da planta.
+        if any(t.quality is not None for t in inf.tiles):
+            corpo["quality"] = [None if t.quality is None else list(t.quality)
+                                for t in inf.tiles]
+        if any(t.conformal_set is not None for t in inf.tiles):
+            corpo["conformal_sets"] = [None if t.conformal_set is None else list(t.conformal_set)
+                                       for t in inf.tiles]
+        if any(t.geometria is not None for t in inf.tiles):
+            corpo["geometria"] = [t.geometria for t in inf.tiles]
+        if any(t.novidade is not None for t in inf.tiles):
+            corpo["novidade"] = [t.novidade for t in inf.tiles]
         if perfil.tile_probabilities == "full":
             corpo["probabilities"] = [list(t.probabilities) for t in inf.tiles]
         else:
@@ -454,10 +546,22 @@ class RoverCore:
         caminho, digest = self.store.write_blob(dados, ".jpg")
         return [("reduzida", caminho, digest, len(dados), "image/jpeg")]
 
+    def _view_files(self, desfecho: Outcome, decisao: RetentionDecision) -> list[tuple]:
+        """Os originais das vistas extras que a percepção ativa mandou guardar (validação)."""
+        if decisao.tier is not Tier.ORIGINAL:
+            return []
+        saida = []
+        for i, vista in enumerate(desfecho.extra_frames, start=1):
+            caminho, digest = self.store.write_blob(vista.data,
+                                                    SUFFIX.get(vista.content_type, ".bin"))
+            saida.append((f"vista{i}", caminho, digest, len(vista.data), vista.content_type))
+        return saida
+
     def _persist_sequence(self, seq: EventSequence) -> int:
         """Grava os quadros de contexto de uma sequência do buffer (resolução do buffer)."""
         cfg = self.config.buffer
         total = 0
+        retido = self.orcamento.motivo_do_contexto(seq.event_id)
         with self.store.transaction() as conn:
             for posicao, quadro in seq.context:
                 dados, _w, _h = reduce_image(quadro.frame.data, cfg.max_side, cfg.jpeg_quality)
@@ -471,7 +575,8 @@ class RoverCore:
                      Tier.ORIGINAL.value, self._context_retention(quadro.frame),
                      self.clock.now().isoformat()),
                 )
-                self._enqueue_file(conn, file_id, digest, len(dados), cfg.priority)
+                self._enqueue_file(conn, file_id, digest, len(dados), cfg.priority,
+                                   retido=retido)
                 total += len(dados)
         return total
 
@@ -482,19 +587,22 @@ class RoverCore:
         return (frame.captured_at + timedelta(days=max(dias, default=30))).isoformat()
 
     def _enqueue_file(self, conn, file_id: str, digest: str, tamanho: int,
-                      prioridade: Priority) -> None:
+                      prioridade: Priority, *, retido: str | None = None) -> None:
+        """Na fila; ``retido`` (o motivo) = fica no disco e só sobe se a plataforma pedir."""
         tamanho_chunk = self.config.sync.chunk_size
         conn.execute(
             "INSERT INTO sync_queue (id, kind, ref_id, sha256, size_bytes, chunk_size, "
-            "chunks_total, priority, status, created_at, seq) "
-            "VALUES (?, 'file', ?, ?, ?, ?, ?, ?, 'PENDENTE', ?, ?)",
+            "chunks_total, priority, status, last_error, created_at, seq) "
+            "VALUES (?, 'file', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (f"up-{file_id}", file_id, digest, tamanho, tamanho_chunk,
-             max(1, -(-tamanho // tamanho_chunk)), int(prioridade), self.clock.now().isoformat(),
-             self.store.next_counter("queue_seq")),
+             max(1, -(-tamanho // tamanho_chunk)), int(prioridade),
+             "RETIDO" if retido else "PENDENTE", f"retido: {retido}" if retido else None,
+             self.clock.now().isoformat(), self.store.next_counter("queue_seq")),
         )
 
     def _result_body(self, result_id, frame, gps, missao, inf: Inference,
-                     decisao: RetentionDecision, event_id, arquivos) -> dict:
+                     decisao: RetentionDecision, event_id, arquivos,
+                     desfecho: Outcome | None = None) -> dict:
         pacote = self.engine.package
         sensores = {}
         if self.hardware.sensors is not None:
@@ -521,7 +629,7 @@ class RoverCore:
             "occurred_at": frame.captured_at.isoformat(),
             "frame": {"camera_id": frame.camera_id, "frame_index": frame.frame_index,
                       "width": frame.width, "height": frame.height,
-                      "content_type": frame.content_type},
+                      "content_type": frame.content_type, "view": frame.view},
             "position": None if gps is None else {
                 "lat": gps.lat, "lon": gps.lon, "alt_m": gps.alt_m, "fix": gps.fix,
                 "hdop": gps.hdop, "heading_deg": gps.heading_deg,
@@ -543,10 +651,13 @@ class RoverCore:
                        "latency_ms": inf.latency_ms, "input_size": inf.input_size,
                        "event_tiles": inf.event_tiles, "evidence": inf.evidence},
             "tiles": self._tiles_body(inf, frame),
+            "rgbd": inf.rgbd,
+            "percepcao": desfecho.block if desfecho is not None else None,
             "retention": {"tier": decisao.tier.value,
                           "retention_until": decisao.retention_until.isoformat(),
                           "priority": int(decisao.priority),
-                          "sampled_for_validation": decisao.sampled_for_validation},
+                          "sampled_for_validation": decisao.sampled_for_validation,
+                          "for_validation": bool(desfecho and desfecho.for_validation)},
             "event_id": event_id,
             "files": [{"role": papel, "sha256": digest, "size_bytes": tamanho}
                       for papel, _c, digest, tamanho, _t in arquivos],
@@ -588,7 +699,19 @@ class RoverCore:
             "files_bytes": self.store.scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM files"),
             "queue": self.sync.queue_status(),
             "pending": self.sync.pending(),
+            "percepcao": self.percepcao.snapshot(),
+            "dados": self.orcamento.relatorio(),
         }
+
+    def _dados_na_saude(self) -> dict:
+        """O consumo do dia, resumido, para a saúde que sobe na telemetria."""
+        r = self.orcamento.relatorio()
+        return {k: r[k] for k in ("dia", "usado_bytes", "enviados_bytes", "recebidos_bytes",
+                                  "teto_dia_bytes", "fracao_usada", "origem_do_teto",
+                                  "prioridade_maxima_liberada", "adiados")} | {
+            "retidos": sum(v["itens"] for v in r["retidos"].values()),
+            "tempestade": r["tempestade"]["ativa"],
+            "por_classe": {c: v["enviados"] + v["recebidos"] for c, v in r["por_classe"].items()}}
 
 
 __all__ = ["ModelError", "RoverCore", "StepReport"]

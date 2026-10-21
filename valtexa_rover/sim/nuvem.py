@@ -42,6 +42,11 @@ class NuvemEmMemoria:
                                      headers["X-Valtexa-Timestamp"],
                                      headers["X-Valtexa-Nonce"], body)
         self.public_key.verify(bytes.fromhex(headers["X-Valtexa-Signature"]), mensagem)
+        if headers.get("Content-Encoding") == "gzip":  # assinado comprimido, como na plataforma
+            import gzip
+
+            self.bytes_comprimidos = getattr(self, "bytes_comprimidos", 0) + len(body)
+            body = gzip.decompress(body)
         if self.fail_queue:
             return HttpResponse(self.fail_queue.pop(0), b'{"detail": "falha injetada"}')
         partes = path.strip("/").split("/")

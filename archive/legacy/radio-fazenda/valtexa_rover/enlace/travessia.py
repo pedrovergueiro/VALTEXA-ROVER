@@ -30,9 +30,10 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
+from valtexa_rover._compat import UTC
 from valtexa_rover.enlace.levantamento import MapaDeCobertura, para_graus, para_metros
 
 LIVRE, ANTECIPANDO, EM_TRAVESSIA, VOLTANDO = "livre", "antecipando", "em_travessia", "voltando"

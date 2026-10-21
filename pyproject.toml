@@ -43,7 +43,8 @@ line-length = 100
 target-version = "py310"
 # Cópia byte a byte do ia/ (ver valtexa_rover/edge_ai/vendor/__init__.py): o
 # estilo é o de lá, e editar para agradar o lint quebraria a conferência.
-extend-exclude = ["valtexa_rover/edge_ai/vendor/preprocess.py",
+extend-exclude = ["archive",  # código arquivado: fora do lint, dos testes e do pacote
+                  "valtexa_rover/edge_ai/vendor/preprocess.py",
                   "valtexa_rover/edge_ai/vendor/onnx_runtime.py",
                   "valtexa_rover/edge_ai/vendor/rover_geometry.py",
                   "valtexa_rover/edge_ai/vendor/heads.py"]

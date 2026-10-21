@@ -8,6 +8,7 @@ módulo não sabe se do outro lado há HTTPS, um rádio ou um teste.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from valtexa_rover.clock import Clock
-from valtexa_rover.hal.interfaces import HttpResponse, Network
+from valtexa_rover.hal.interfaces import HttpResponse, Network, NetworkUnavailableError
 
 REQUEST_ALGORITHM = "VALTEXA-ED25519-REQUEST-V1"
 
@@ -118,6 +119,9 @@ class DeviceClient:
         self.network = network
         self.clock = clock
         self._key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(identity.private_key))
+        self.contador = None
+        """Gancho do orçamento de dados: ``contador(método, caminho, enviados, recebidos)``
+        a cada requisição que trafegou (:meth:`OrcamentoDados.contar`)."""
 
     def request(
         self,
@@ -128,12 +132,18 @@ class DeviceClient:
         raw: bytes | None = None,
         content_type: str | None = None,
         extra_headers: dict[str, str] | None = None,
+        gzip_body: bool = False,
     ) -> HttpResponse:
         if json_body is not None:
             body = json.dumps(json_body, separators=(",", ":"), ensure_ascii=False).encode()
             content_type = "application/json"
         else:
             body = raw or b""
+        if gzip_body:
+            # A assinatura é dos bytes que trafegam (comprimidos): a plataforma confere antes
+            # de descomprimir. ``mtime=0``: o mesmo corpo dá os mesmos bytes.
+            body = gzip.compress(body, compresslevel=6, mtime=0)
+            extra_headers = {**(extra_headers or {}), "Content-Encoding": "gzip"}
         caminho, _, query = path.partition("?")
         timestamp = str(int(self.clock.now().timestamp()))
         nonce = secrets.token_hex(16)
@@ -149,4 +159,15 @@ class DeviceClient:
         if content_type:
             headers["Content-Type"] = content_type
         headers.update(extra_headers or {})
-        return self.network.send(method.upper(), path, body, headers)
+        cabecalhos = sum(len(k) + len(v) + 4 for k, v in headers.items())
+        try:
+            resposta = self.network.send(method.upper(), path, body, headers)
+        except NetworkUnavailableError as exc:
+            # Caiu depois de abrir a conexão: o corpo pode ter saído pela Starlink. Conta
+            # (o chunk que esgota o tempo e é reenviado gasta duas vezes — e assim aparece).
+            if self.contador is not None and getattr(exc, "pode_ter_enviado", False):
+                self.contador(method.upper(), path, len(body) + cabecalhos, 0)
+            raise
+        if self.contador is not None:
+            self.contador(method.upper(), path, len(body) + cabecalhos, len(resposta.body or b""))
+        return resposta

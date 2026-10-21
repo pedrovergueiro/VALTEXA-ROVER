@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -64,6 +65,15 @@ class LocalDiskStorage:
         return DeviceInfo("armazenamento", "disco local", False, {"cota": self.quota_bytes})
 
 
+def _pode_ter_enviado(exc: BaseException) -> bool:
+    """Se o corpo do pedido pode ter saído antes da falha (o orçamento conta pelo lado seguro).
+
+    Só não sai quando a conexão nem abriu: DNS que falha ou recusa de conexão.
+    """
+    motivo = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    return not isinstance(motivo, (socket.gaierror, ConnectionRefusedError))
+
+
 class HttpNetwork:
     """HTTPS até a plataforma. Falha de conexão vira :class:`NetworkUnavailableError`.
 
@@ -92,7 +102,8 @@ class HttpNetwork:
             return HttpResponse(exc.code, exc.read(), dict(exc.headers or {}))
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             self._online = False
-            raise NetworkUnavailableError(str(exc)) from exc
+            raise NetworkUnavailableError(
+                str(exc), pode_ter_enviado=_pode_ter_enviado(exc)) from exc
 
     def describe(self) -> DeviceInfo:
         return DeviceInfo("rede", "HTTPS", False, {"base_url": self.base_url})

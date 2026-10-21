@@ -1,4 +1,4 @@
-"""Vídeo ao vivo do Rover: pedido, origem da imagem, qualidade adaptativa e o enlace."""
+"""Vídeo ao vivo do Rover: pedido, origem da imagem e qualidade adaptativa à rede."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from PIL import Image
 
 from valtexa_rover._compat import UTC
 from valtexa_rover.clock import ManualClock
-from valtexa_rover.enlace.rpc import P3, PRAZO_VIDEO, classifica
 from valtexa_rover.hal.interfaces import Frame, HardwareUnavailableError, HttpResponse
 from valtexa_rover.runtime.video import DEGRAUS, PedidoDeVideo, TransmissorDeVideo
 
@@ -148,13 +147,6 @@ def test_executor_de_comandos_repassa_o_cabecalho(tmp_path) -> None:
     ex.video = _tx(Hw(Camera()), Cliente())
     ex.poll()
     assert ex.video.pedido() is not None and ex.video.pedido().cameras == ("cam-0",)
-
-
-def test_enlace_video_e_slot_so_o_ultimo_abaixo_de_comando() -> None:
-    prio, slot = classifica("POST", "/v1/device/video/cam-2", b"")
-    assert prio == P3 and slot == "video:cam-2"
-    assert classifica("GET", "/v1/device/commands", b"")[0] < P3
-    assert PRAZO_VIDEO <= 3.0
 
 
 def test_previa_da_oak_d_com_sdk_falso() -> None:

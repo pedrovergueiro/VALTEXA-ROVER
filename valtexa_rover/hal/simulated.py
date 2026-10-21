@@ -15,8 +15,10 @@ import io
 import itertools
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from valtexa_rover.clock import Clock
@@ -94,6 +96,114 @@ class FolderCamera:
             "camera", "pasta de imagens", True,
             {"camera_id": self.camera_id, "imagens": len(self.files)},
         )
+
+
+class SimulatedRgbdCamera:
+    """SIMULAÇÃO: OAK-D de mentira, com foto, mapa de profundidade e captura por região.
+
+    A cena é a saia de uma planta (verde, a ``distancia_mm``) vista de lado, com:
+
+    * ``vaos``: faixas ``(x0, x1)`` da cena por onde aparece o fundo (a ``fundo_mm``, cor
+      ``cor_fundo``) — a rua, a linha vizinha;
+    * ``manchas``: quadrados ``{"x", "y", "lado", "cor"}`` na cena. ``cor_regiao`` (opcional)
+      é a cor que a mancha mostra numa captura por região que a cobre — a exposição certa
+      revela a lesão de verdade; ``so_na_primeira`` faz da mancha um reflexo, que só existe
+      na primeira captura; ``no_fundo`` põe a mancha no fundo (um objeto vermelho na rua).
+
+    Cada captura desloca a cena ``passo_px`` para a esquerda (o Rover anda). ``cobertura`` é a
+    fração de pixels com medida no mapa; ``cobertura_primeira``, a da primeira captura só (a
+    OAK-D que perdeu a medida num quadro). O mapa tem 1/5 do lado da foto.
+    """
+
+    def __init__(self, camera_id: str, clock: Clock, *, tamanho: tuple[int, int] = (1600, 1200),
+                 distancia_mm: float = 270.0, fundo_mm: float = 2500.0,
+                 cor_planta: tuple[int, int, int] = (0, 255, 0),
+                 cor_fundo: tuple[int, int, int] = (128, 128, 128),
+                 vaos: Sequence[tuple[int, int]] = (), manchas: Sequence[dict] = (),
+                 passo_px: int = 24, cobertura: float = 1.0,
+                 cobertura_primeira: float | None = None, altura_mm: float = 1000.0,
+                 hfov_deg: float | None = None, textura: int = 14, seed: int = 0) -> None:
+        self.camera_id = camera_id
+        self.clock = clock
+        self.tamanho = tamanho
+        self.distancia_mm = distancia_mm
+        self.fundo_mm = fundo_mm
+        self.cor_planta = cor_planta
+        self.cor_fundo = cor_fundo
+        self.vaos = list(vaos)
+        self.manchas = [dict(m) for m in manchas]
+        self.passo_px = passo_px
+        self.cobertura = cobertura
+        self.cobertura_primeira = cobertura_primeira
+        self.altura_mm = altura_mm
+        self.hfov_deg = hfov_deg
+        self.rng = np.random.default_rng(seed)
+        # Textura de folhagem presa à cena (anda junto com ela): é o que o alinhamento usa.
+        bruta = np.random.default_rng(seed + 1).integers(-textura, textura + 1,
+                                                         (tamanho[1] // 4, tamanho[0] // 2 + 1))
+        self._textura = np.repeat(np.repeat(bruta, 4, axis=0), 4, axis=1)
+        self.capturas = 0
+        self.regioes: list[tuple[float, float, float, float]] = []
+        """As regiões pedidas por :meth:`capture_region`, em ordem."""
+
+    def _render(self, regiao: tuple[float, float, float, float] | None) -> Frame:
+        indice = self.capturas
+        self.capturas += 1
+        largura, altura = self.tamanho
+        deslocamento = indice * self.passo_px
+        rgb = np.empty((altura, largura, 3), dtype=np.uint8)
+        rgb[:] = self.cor_planta
+        prof = np.full((altura // 5, largura // 5), self.distancia_mm, dtype=np.float64)
+        for x0, x1 in self.vaos:
+            a, b = max(0, x0 - deslocamento), min(largura, x1 - deslocamento)
+            if b > a:
+                rgb[:, a:b] = self.cor_fundo
+                prof[:, a // 5:max(a // 5 + 1, b // 5)] = self.fundo_mm
+        for m in self.manchas:
+            if m.get("so_na_primeira") and indice > 0:
+                continue
+            x0, y0 = int(m["x"]) - deslocamento, int(m["y"])
+            x1, y1 = x0 + int(m["lado"]), y0 + int(m["lado"])
+            a, b = max(0, x0), min(largura, x1)
+            if b <= a:
+                continue
+            cor = m["cor"]
+            if regiao is not None and m.get("cor_regiao") is not None:
+                cx, cy = (x0 + x1) / 2 / largura, (y0 + y1) / 2 / altura
+                if regiao[0] <= cx <= regiao[2] and regiao[1] <= cy <= regiao[3]:
+                    cor = m["cor_regiao"]
+            rgb[y0:y1, a:b] = cor
+            if m.get("no_fundo"):
+                prof[y0 // 5:max(y0 // 5 + 1, y1 // 5), a // 5:max(a // 5 + 1, b // 5)] = (
+                    self.fundo_mm)
+        largura_textura = self._textura.shape[1]
+        colunas = (np.arange(largura) + deslocamento) % largura_textura
+        relevo = self._textura[:altura][:, colunas]
+        rgb = np.clip(rgb.astype(np.int16) + relevo[..., None], 0, 255).astype(np.uint8)
+        cobertura = (self.cobertura_primeira if indice == 0 and self.cobertura_primeira
+                     is not None else self.cobertura)
+        if cobertura < 1.0:
+            prof[self.rng.random(prof.shape) >= cobertura] = 0.0
+        saida = io.BytesIO()
+        Image.fromarray(rgb).save(saida, "JPEG", quality=92)
+        validos = prof[prof > 0]
+        distancia = float(np.median(validos)) if validos.size > prof.size // 20 else None
+        return Frame(self.camera_id, indice, self.clock.now(), saida.getvalue(), "image/jpeg",
+                     largura, altura, source="rgbd-simulada", distance_mm=distancia,
+                     camera_height_mm=self.altura_mm, hfov_deg=self.hfov_deg,
+                     depth=prof.astype(np.uint16))
+
+    def capture(self) -> Frame:
+        return self._render(None)
+
+    def capture_region(self, region: tuple[float, float, float, float],
+                       distance_mm: float | None = None) -> Frame:
+        self.regioes.append(tuple(region))
+        return replace(self._render(tuple(region)), view="regiao")
+
+    def describe(self) -> DeviceInfo:
+        return DeviceInfo("camera", "OAK-D simulada (RGB-D)", True,
+                          {"camera_id": self.camera_id, "passo_px": self.passo_px})
 
 
 class TrajectoryGps:
@@ -270,19 +380,76 @@ class FlakyNetwork:
 
 
 class SimulatedController:
-    """SIMULAÇÃO: controlador que só registra os pedidos de parada."""
+    """SIMULAÇÃO: controlador que só registra os pedidos de parada e de velocidade."""
 
-    def __init__(self) -> None:
+    def __init__(self, estado: dict | None = None) -> None:
         self.stops: list[str] = []
+        self.velocidades: list[dict] = []
+        self.estado_extra = dict(estado or {})
+        """O que a navegação publicaria (``modo``, ``speed_ms``, ``reducao_permitida``...)."""
 
     def state(self) -> dict:
-        return {"moving": not self.stops, "stops": len(self.stops)}
+        return {"moving": not self.stops, "stops": len(self.stops), **self.estado_extra}
 
     def stop(self, reason: str) -> None:
         self.stops.append(reason)
 
+    def pedir_velocidade(self, fator: float, segundos: float, motivo: str) -> dict:
+        pedido = {"fator": fator, "seconds": segundos, "reason": motivo}
+        self.velocidades.append(pedido)
+        return pedido
+
     def describe(self) -> DeviceInfo:
         return DeviceInfo("controlador", "registro de comandos", True)
+
+
+class SimulatedThermal:
+    """SIMULAÇÃO: câmera térmica que devolve um campo de temperatura com um ponto quente."""
+
+    def __init__(self, base_c: float = 26.0, quente: tuple[float, float, float] | None = None,
+                 tamanho: tuple[int, int] = (120, 160), relogio=None, raio_px: int = 5) -> None:
+        self.base_c, self.quente, self.tamanho, self.raio_px = base_c, quente, tamanho, raio_px
+        self.relogio = relogio
+        self.capturas = 0
+
+    def capture(self):
+        from datetime import datetime
+
+        from valtexa_rover._compat import UTC
+        from valtexa_rover.hal.interfaces import ThermalFrame
+
+        self.capturas += 1
+        h, w = self.tamanho
+        campo = np.full((h, w), self.base_c, dtype=np.float32)
+        if self.quente is not None:  # (x, y, +°C) em fração da foto
+            fx, fy, delta = self.quente
+            r = self.raio_px
+            campo[max(0, int(fy * h) - r):int(fy * h) + r,
+                  max(0, int(fx * w) - r):int(fx * w) + r] += delta
+        agora = self.relogio.now() if self.relogio else datetime.now(UTC)
+        return ThermalFrame(campo, agora)
+
+    def describe(self) -> DeviceInfo:
+        return DeviceInfo("termica", "câmera térmica simulada", True, {"base_c": self.base_c})
+
+
+class SimulatedLight:
+    """SIMULAÇÃO: luz auxiliar que guarda os níveis pedidos."""
+
+    def __init__(self, nivel: float = 0.0) -> None:
+        self.nivel = nivel
+        self.historico: list[float] = []
+
+    def level(self) -> float:
+        return self.nivel
+
+    def set_level(self, nivel: float) -> float:
+        self.nivel = min(1.0, max(0.0, float(nivel)))
+        self.historico.append(self.nivel)
+        return self.nivel
+
+    def describe(self) -> DeviceInfo:
+        return DeviceInfo("luz", "luz auxiliar simulada", True, {"nivel": self.nivel})
 
 
 def _along(points: list[tuple[float, float]], distance_m: float) -> tuple[float, float, float]:

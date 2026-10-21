@@ -66,5 +66,46 @@
   "saude": {
     "min_free_bytes": 2147483648,
     "max_temperature_c": 70.0
+  },
+  "profundidade": {
+    "modo": "filtrar",
+    "frente_mm": 150.0,
+    "tras_mm": 450.0,
+    "min_validos_recorte": 0.25,
+    "min_na_planta": 0.35,
+    "min_cobertura_quadro": 0.15,
+    "usar_distancia": true
+  },
+  "percepcao_ativa": {
+    "ativa": true,
+    "max_vistas_extras": 2,
+    "max_extras_por_minuto": 6,
+    "tempo_max_ms": 4000.0,
+    "margem_evidencia": null,
+    "incerto_sem_profundidade": true,
+    "incerto_em_anomalia": true,
+    "min_registro": 0.06,
+    "max_desvio_vertical": 0.06,
+    "max_desvio_horizontal": 0.5,
+    "margem_regiao": 1.0,
+    "pedir_pausa_s": 0.0,
+    "prioridade_minima": 0.15,
+    "prioridade_alta": 0.5,
+    "reserva_prioridade_alta": 2,
+    "incerto_em_ambiguidade": true,
+    "min_recortes_ambiguos": 2,
+    "incerto_em_qualidade": true,
+    "fracao_qualidade_baixa": 0.5,
+    "reduzir_velocidade": false,
+    "fator_velocidade": 0.3,
+    "duracao_reducao_s": 1.5,
+    "latencia_vista_s": 0.4,
+    "ajustar_luz": true,
+    "passo_luz": 0.3,
+    "incerto_em_novidade": true,
+    "limiar_novidade": 1.2,
+    "fracao_recortes_novos": 0.3,
+    "usar_termica": true,
+    "guardar_vistas": "incertas"
   }
 }
