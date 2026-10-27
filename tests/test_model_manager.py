@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 from conftest import designation
 
-from valtexa_rover.runtime.model_manager import ModelError
+from valtexa_rover.runtime.model_manager import ModelError, manifesto_dos_extras
 
 
 def _eventos(rig, tipo: str) -> list:
@@ -103,3 +106,57 @@ def test_versoes_informadas_a_plataforma(rig_factory) -> None:
     assert sessao["runtime_version"] and sessao["edge_ai_version"]
     rig.core.sync.step()
     assert len(rig.cloud.sessions) == 1  # só informa de novo quando muda
+
+
+def _com_manifesto(rig) -> str:
+    """Grava o manifesto dos extras na origem e designa o modelo com o hash dele."""
+    manifesto = manifesto_dos_extras(rig.repo / f"{rig.sha}.onnx")
+    (rig.repo / f"{rig.sha}.manifest.json").write_bytes(manifesto)
+    esperado = hashlib.sha256(manifesto).hexdigest()
+    rig.cloud.designations = [designation("talhao-1", rig.sha, extras_manifest_sha256=esperado)]
+    rig.core.models.refresh()
+    for arquivo in rig.core.models.models_dir.glob(f"{rig.sha}.*"):
+        arquivo.unlink()  # robô sem a cópia: busca na origem e confere tudo
+    return esperado
+
+
+def test_extras_conferidos_pelo_manifesto_do_registry(rig_factory) -> None:
+    rig = rig_factory(["verde"])
+    _com_manifesto(rig)
+    rig.core.close()
+    rig.core = rig.new_core()
+    pacote = rig.core.models.activate_for_field("talhao-1")
+    assert pacote.sha256 == rig.sha and rig.core.engine.loaded
+    assert (rig.core.models.models_dir / f"{rig.sha}.manifest.json").exists()
+
+
+@pytest.mark.parametrize("estrago", ["alterado", "sobrando", "faltando", "manifesto"])
+def test_extra_que_nao_bate_com_o_manifesto_e_recusado(rig_factory, estrago) -> None:
+    rig = rig_factory(["verde"])
+    _com_manifesto(rig)
+    origem = rig.repo / f"{rig.sha}.onnx"
+    if estrago == "alterado":
+        origem.with_suffix(".labels.json").write_text(json.dumps(["sadia", "outra"]))
+    elif estrago == "sobrando":  # uma cabeça "adaptada" enfiada sem passar pelo registry
+        origem.with_suffix(".conformal.json").write_text("{}")
+    elif estrago == "faltando":
+        origem.with_suffix(".labels.json").unlink()
+    else:
+        origem.with_suffix(".manifest.json").write_bytes(b'{"formato":1,"arquivos":{}}')
+    rig.core.close()
+    rig.core = rig.new_core()
+    assert not rig.core.engine.loaded
+    with pytest.raises(ModelError, match="manifesto"):
+        rig.core.models.activate_for_field("talhao-1")
+    assert not rig.core.engine.loaded
+    recusas = [json.loads(e[0])["payload"] for e in _eventos(rig, "MODEL_REJECTED")]
+    assert any(r.get("expected_manifest_sha256") for r in recusas)
+    # O pacote ruim sai do robô: a próxima ativação busca de novo na origem.
+    assert not list(rig.core.models.models_dir.glob(f"{rig.sha}.*"))
+
+
+def test_designacao_sem_manifesto_continua_carregando(rig_factory) -> None:
+    rig = rig_factory(["verde"])
+    rig.core.models.activate_for_field("talhao-1")
+    [evento] = _eventos(rig, "MODEL_UPDATED")
+    assert json.loads(evento[0])["payload"]["extras_conferidos"] is False

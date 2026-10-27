@@ -11,7 +11,11 @@ O ciclo:
 3. :meth:`ModelManager.activate_for_field` confere o SHA-256 **do arquivo** contra
    o do registry antes de entregar à Edge AI. Hash diferente → ``MODEL_REJECTED``
    (crítico) e o modelo não carrega. Designação sem hash → não carrega.
-   Arquivo que não está designado → nunca carrega, nem que esteja na pasta.
+   Arquivo que não está designado → nunca carrega, nem que esteja na pasta;
+4. os arquivos ao lado do ONNX (perfil, cabeça, conformal...) mudam o que o robô decide sem
+   mudar o ONNX. Quando o registry traz ``extras_manifest_sha256``, o manifesto
+   ``<sha>.manifest.json`` (gerado por :func:`stage_model`) precisa ter esse hash e cada
+   arquivo precisa bater com ele: alterado, faltando ou sobrando → ``MODEL_REJECTED``.
 
 O que o robô roda vai para a plataforma em ``POST /v1/device/session`` (a frota
 mostra "conforme/divergente/fora do registry") e em **cada resultado** da Edge AI.
@@ -20,6 +24,7 @@ mostra "conforme/divergente/fora do registry") e em **cada resultado** da Edge A
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +52,7 @@ class Designation:
     dnaty_version: str | None
     target_hardware: str | None
     reason: str | None = None
+    extras_manifest_sha256: str | None = None
 
 
 class ArtifactSource(Protocol):
@@ -75,7 +81,7 @@ class FolderArtifactSource:
             return False
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(origem, destination)
-        for extra in EXTRAS:
+        for extra in (*EXTRAS, MANIFESTO):
             lado = origem.with_suffix(extra)
             if lado.exists():
                 shutil.copyfile(lado, destination.with_suffix(extra))
@@ -87,6 +93,42 @@ EXTRAS = (".labels.json", ".categories.json", ".edge.json", ".head.npz", ".encod
 """Arquivos que viajam ao lado do ``<sha>.onnx``. ``.head.npz`` e ``.encoder.onnx`` (a torre
 de visão do SigLIP 2, ~355 MB) só existem nos modelos com cabeça — o café;
 ``.head.provenance.json``, só com cabeça adaptada no campo (sem ela, adaptada não roda)."""
+
+MANIFESTO = ".manifest.json"
+"""``<sha>.manifest.json``: o SHA-256 de cada arquivo de :data:`EXTRAS` ao lado do ONNX. O hash
+do manifesto vai para o registry (``extras_manifest_sha256``) e ancora os extras nele."""
+
+
+def manifesto_dos_extras(onnx: Path) -> bytes:
+    """O manifesto dos extras que estão ao lado de ``onnx``, em JSON canônico (hash estável)."""
+    arquivos = {x: file_sha256(onnx.with_suffix(x)) for x in EXTRAS
+                if onnx.with_suffix(x).exists()}
+    return json.dumps({"formato": 1, "arquivos": arquivos}, sort_keys=True,
+                      separators=(",", ":")).encode()
+
+
+def confere_extras(onnx: Path, esperado: str) -> list[str]:
+    """Problemas dos extras de ``onnx`` contra o manifesto de hash ``esperado`` (vazio = ok)."""
+    caminho = onnx.with_suffix(MANIFESTO)
+    if not caminho.exists():
+        return [f"{caminho.name} não está no robô"]
+    bruto = caminho.read_bytes()
+    if hashlib.sha256(bruto).hexdigest() != esperado:
+        return [f"{caminho.name} não é o manifesto do registry"]
+    try:
+        listados = json.loads(bruto)["arquivos"]
+    except (ValueError, KeyError, TypeError):
+        return [f"{caminho.name} ilegível"]
+    problemas = []
+    for x in EXTRAS:
+        presente = onnx.with_suffix(x).exists()
+        if x in listados and not presente:
+            problemas.append(f"{x} falta")
+        elif presente and x not in listados:
+            problemas.append(f"{x} não está no manifesto")
+        elif presente and file_sha256(onnx.with_suffix(x)) != listados[x]:
+            problemas.append(f"{x} alterado")
+    return problemas
 
 
 def stage_model(onnx: Path | str, folder: Path | str, engine: EdgeAIEngine, *,
@@ -122,6 +164,8 @@ def stage_model(onnx: Path | str, folder: Path | str, engine: EdgeAIEngine, *,
             fontes.append((Path(encoder), ".encoder.onnx"))
         for de, sufixo in fontes:
             shutil.copyfile(de, preparo / f"{sha}{sufixo}")
+        manifesto = manifesto_dos_extras(preparo / f"{sha}.onnx")
+        (preparo / f"{sha}{MANIFESTO}").write_bytes(manifesto)
         try:
             engine.load(ModelPackage(chave, "preparo", sha, preparo / f"{sha}.onnx"))
         except EdgeAIError as exc:
@@ -132,7 +176,9 @@ def stage_model(onnx: Path | str, folder: Path | str, engine: EdgeAIEngine, *,
             copiados.append(arquivo.name)
     finally:
         shutil.rmtree(preparo, ignore_errors=True)
-    return {"model_key": chave, "sha256": sha, "labels": list(engine.labels),
+    return {"model_key": chave, "sha256": sha,
+            "extras_manifest_sha256": hashlib.sha256(manifesto).hexdigest(),
+            "labels": list(engine.labels),
             "profile": engine.profile is not None, "head": engine.head is not None,
             "files": copiados, "folder": str(destino)}
 
@@ -190,6 +236,7 @@ class ModelManager:
                 dnaty_version=item.get("dnaty_version"),
                 target_hardware=item.get("target_hardware"),
                 reason=item.get("reason"),
+                extras_manifest_sha256=item.get("extras_manifest_sha256"),
             )
             for item in bruto
         ]
@@ -229,7 +276,7 @@ class ModelManager:
         atual = self.engine.package
         # O mesmo ONNX com perfil recalibrado (limiares da calibração de campo) é outro
         # modelo na prática: recarrega. Sem isto o perfil novo só valeria no próximo boot.
-        marca = self._marca_dos_extras(destino)
+        marca = f"{self._marca_dos_extras(destino)}|{d.extras_manifest_sha256}"
         if (atual is not None and atual.sha256 == d.artifact_sha256
                 and marca == self._marca_carregada):
             return atual
@@ -252,6 +299,23 @@ class ModelManager:
                 f"Hash do artefato de {d.model_key} {d.version} não confere com o registry: "
                 "modelo recusado."
             )
+        if d.extras_manifest_sha256:
+            problemas = confere_extras(destino, d.extras_manifest_sha256)
+            if problemas:
+                # Apaga o pacote inteiro: na próxima ativação a origem entrega de novo.
+                for x in (".onnx", *EXTRAS, MANIFESTO):
+                    destino.with_suffix(x).unlink(missing_ok=True)
+                self.events.emit(
+                    EventType.MODEL_REJECTED,
+                    {"model_key": d.model_key, "version": d.version,
+                     "expected_manifest_sha256": d.extras_manifest_sha256,
+                     "reason": "; ".join(problemas)},
+                    mission_id=mission_id,
+                )
+                raise ModelError(
+                    f"Arquivos ao lado do modelo {d.model_key} {d.version} não conferem com o "
+                    f"manifesto do registry ({'; '.join(problemas)}): modelo recusado."
+                )
         pacote = ModelPackage(
             model_key=d.model_key,
             version=d.version,
@@ -287,6 +351,7 @@ class ModelManager:
              "previous": registrado.get("version") and
              f"{registrado.get('model_key')}@{registrado.get('version')}",
              "artifact_kind": pacote.artifact_kind, "dnaty_version": pacote.dnaty_version,
+             "extras_conferidos": bool(d.extras_manifest_sha256),
              **({"head_provenance": {k: self.engine.procedencia.get(k) for k in (
                  "tipo", "rodada", "escopo", "cabeca", "cabeca_base", "aprovado_por")}}
                 if self.engine.procedencia else {})},

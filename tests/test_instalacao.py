@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -70,7 +71,11 @@ def test_preparar_modelo_confere_mede_e_copia_pelo_sha(tmp_path: Path, capsys) -
     assert saida["medicao"]["recortes"] > 20 and saida["medicao"]["ms_por_quadro"] > 0
     staging = tmp_path / "d" / "ota" / "models"
     assert {p.name for p in staging.iterdir()} == {
-        f"{sha}.onnx", f"{sha}.labels.json", f"{sha}.edge.json"}
+        f"{sha}.onnx", f"{sha}.labels.json", f"{sha}.edge.json", f"{sha}.manifest.json"}
+    # O hash impresso é o do manifesto gravado: é ele que vai para o registry.
+    manifesto = (staging / f"{sha}.manifest.json").read_bytes()
+    assert saida["extras_manifest_sha256"] == hashlib.sha256(manifesto).hexdigest()
+    assert set(json.loads(manifesto)["arquivos"]) == {".labels.json", ".edge.json"}
 
 
 def test_preparar_modelo_recusa_perfil_incoerente(tmp_path: Path, capsys) -> None:

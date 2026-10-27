@@ -135,4 +135,19 @@ def test_preparar_modelo_leva_a_torre_e_a_cabeca(tmp_path, capsys) -> None:
     assert saida["head"] is True and saida["medicao"]["recortes"] > 20
     assert {p.name for p in (dados / "ota" / "models").iterdir()} == {
         f"{sha}.onnx", f"{sha}.labels.json", f"{sha}.edge.json", f"{sha}.head.npz",
-        f"{sha}.encoder.onnx"}
+        f"{sha}.encoder.onnx", f"{sha}.manifest.json"}
+    manifesto = json.loads((dados / "ota" / "models" / f"{sha}.manifest.json").read_text())
+    assert {".head.npz", ".encoder.onnx", ".edge.json"} <= set(manifesto["arquivos"])
+
+
+@pytest.mark.parametrize("de_outra", [False, True])
+def test_conformal_so_vale_com_a_cabeca_com_que_foi_calibrado(tmp_path, de_outra) -> None:
+    onnx = modelo_com_cabeca(tmp_path)
+    cabeca = hashlib.sha256(onnx.with_suffix(".head.npz").read_bytes()).hexdigest()
+    ref = {"class_names": list(LABELS), "alpha": 0.1,
+           "thresholds": {"plain": [0.5] * len(LABELS)}, "calibrated_on": 500,
+           "class_counts": [100] * len(LABELS), "head_sha256": "f" * 64 if de_outra else cabeca}
+    onnx.with_suffix(".conformal.json").write_text(json.dumps(ref), encoding="utf-8")
+    m = motor(onnx)
+    assert (m.conformal is None) is de_outra
+    assert any("outra cabeça" in a for a in m.avisos) is de_outra

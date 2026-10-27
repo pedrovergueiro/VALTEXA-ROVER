@@ -160,7 +160,18 @@ minúsculo): 18,9 MB de originais → **1,89 MB** guardados (10,0 %).
 3. Antes de carregar, o SHA-256 **do arquivo** é comparado ao do registry. Diferente →
    `MODEL_REJECTED` (crítico) e não carrega. Designação sem hash → não carrega. Arquivo sem
    designação → nunca carrega. **Missão não começa sem modelo do registry.**
-4. As versões (runtime, Edge AI, modelo, dNATY, hardware) vão em `POST /v1/device/session`
+4. Os arquivos ao lado do ONNX (perfil `.edge.json`, cabeça, torre de visão, conformal,
+   régua de qualidade, novidade, rótulos, procedência) mudam o que o robô decide sem mudar o
+   ONNX. O `preparar-modelo` grava `<sha>.manifest.json` com o SHA-256 de cada um e imprime
+   `extras_manifest_sha256`; registre esse hash na versão do modelo (plataforma). Quando a
+   designação o traz, o robô confere o manifesto e cada arquivo: **alterado, faltando ou
+   sobrando** → `MODEL_REJECTED`, o pacote é apagado (a próxima ativação busca de novo) e o
+   modelo não carrega. Versão sem manifesto carrega como antes (só o ONNX conferido) e o
+   `MODEL_UPDATED` diz `extras_conferidos: false`.
+5. O conformal traz a cabeça com que foi calibrado (`head_sha256`): com outra cabeça, o
+   motor o ignora e anota o aviso — limiar de uma cabeça promete cobertura que outra não
+   cumpre.
+6. As versões (runtime, Edge AI, modelo, dNATY, hardware) vão em `POST /v1/device/session`
    quando mudam — é daí que a frota mostra conforme/divergente/fora do registry.
 
 ## 6. Missão
@@ -343,8 +354,9 @@ completado até `tile_batch`: uma forma só, um motor compilado só.
 3. `valtexa-rover preparar-modelo banana_foliar.onnx --dados /var/lib/valtexa-rover` —
    carrega o modelo e o perfil `.edge.json` **neste** acelerador, mede um quadro sintético
    de 12 MP e copia `<sha256>.onnx` + rótulos + categorias + perfil para a área de staging
-   do OTA. Sem perfil, recusa (`--sem-perfil` para forçar). Designe na plataforma o SHA-256
-   impresso para o talhão.
+   do OTA, com o manifesto dos arquivos (`<sha256>.manifest.json`). Sem perfil, recusa
+   (`--sem-perfil` para forçar). Registre na plataforma o `sha256` e o
+   `extras_manifest_sha256` impressos e designe a versão para o talhão.
 4. `systemctl enable --now valtexa-rover`.
 
 **Navegação.** A pilha de navegação (fora deste pacote) e o Runtime trocam três arquivos

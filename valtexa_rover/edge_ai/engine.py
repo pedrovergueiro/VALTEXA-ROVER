@@ -366,7 +366,13 @@ class EdgeAIEngine:
         if package.conformal_path.exists():
             try:
                 ref_c = ConformalReference.load(package.conformal_path)
-                if ref_c.class_names == self.labels and "plain" in ref_c.thresholds:
+                cabeca = (hashlib.sha256(package.head_path.read_bytes()).hexdigest()
+                          if self.head is not None and ref_c.head_sha256 else None)
+                if cabeca is not None and cabeca != ref_c.head_sha256:
+                    # Limiar calibrado com outra cabeça promete cobertura que esta não cumpre.
+                    self.avisos.append(f"{package.conformal_path.name}: calibrado com outra "
+                                       "cabeça — conformal ignorado")
+                elif ref_c.class_names == self.labels and "plain" in ref_c.thresholds:
                     self.conformal = ref_c
                 else:
                     self.avisos.append(f"{package.conformal_path.name}: classes ou modo não batem "

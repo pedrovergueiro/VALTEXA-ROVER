@@ -115,6 +115,14 @@ class ConformalReference:
     doentes (01/10/2026). A resposta da API traz o conjunto honesto; a fusão segue
     recebendo o original (``prediction_sets(..., base=True)``)."""
 
+    head_sha256: str | None = None
+    """SHA-256 da cabeça de diagnóstico com que os limiares foram calibrados; ``None`` em
+    modelo sem cabeça (ou calibração anterior a esta marca).
+
+    A cabeça muda as probabilidades e, com elas, a cobertura: limiar de uma cabeça aplicado
+    a outra promete 90% sem cumprir. Quem carrega confere a marca contra a cabeça instalada
+    e ignora a calibração de outra (o ``adapt_campo promove`` troca a cabeça)."""
+
     @classmethod
     def fit(
         cls,
@@ -228,6 +236,8 @@ class ConformalReference:
         }
         if self.base_thresholds is not None:
             payload["base_thresholds"] = self.base_thresholds
+        if self.head_sha256 is not None:
+            payload["head_sha256"] = self.head_sha256
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -252,6 +262,7 @@ class ConformalReference:
                     if raw.get("base_thresholds")
                     else None
                 ),
+                head_sha256=raw.get("head_sha256") or None,
             )
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Referência conformal ilegível em {path}: {exc}") from exc
